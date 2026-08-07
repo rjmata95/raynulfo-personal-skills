@@ -90,10 +90,61 @@ silently.
 arrays, no `mapfile`, no `[[ -v ]]`, and no `timeout` binary. See the header of
 `bin/_dbq-lib.sh` before modernising anything.
 
+## `snq` — ServiceNow from the CLI, without an IT ticket
+
+Read/create/update/comment/resolve ServiceNow incidents from the shell, authenticating by
+reusing a browser-captured Okta SSO session.
+
+**The problem it solves.** `chenmed.service-now.com` sits behind Okta SAML, and its REST API
+advertises only `WWW-Authenticate: Basic` or an OAuth bearer token. A federated SSO account can
+produce neither without an admin registering an OAuth client in the Application Registry — an IT
+request with real lead time. Unlike Snowflake, ServiceNow has no `authenticator=externalbrowser`
+equivalent baked into the protocol.
+
+**What replaces it.** Log in once through a real browser (real Okta, real MFA), capture the
+session, reuse it from the CLI until it expires.
+
+| Piece | Role |
+|---|---|
+| `bin/snq` | The CLI. Incident verbs over the Table API via `curl`. |
+| `bin/snq-auth` | Browser SSO capture. **TTY-only — humans only.** |
+| `bin/snq-doctor` | Read-only diagnosis. Agent-safe, prints no secrets. |
+| `bin/_snq-lib.sh` | Shared config/HTTP/session handling. |
+| `skills/servicenow-tickets/` | How to read and write tickets. Used constantly. |
+| `skills/setting-up-snq/` | Install, link, verify. Used once per machine. |
+| `config/instance.conf` | Instance hostname. **No secrets.** |
+
+```bash
+ln -sfn "$PWD/bin/snq" ~/.local/bin/snq
+npm install -g playwright && npx playwright install chromium
+
+snq doctor                 # what's missing
+snq auth                   # browser + Okta  (run this yourself)
+snq whoami                 # verify
+
+snq inc list --state active --priority 1
+snq inc get INC0012345
+snq inc create --desc "Readiness probe regression" --priority 3
+snq inc comment INC0012345 "Rolled back to 3.3.12."
+snq inc resolve INC0012345 --note "Config patch deployed."
+```
+
+**What you're accepting.** A live production session token rests at `~/.config/snq/session`
+(chmod 600, outside git). It expires on its own — ~30 min idle, ~8 h absolute — so the blast
+radius is bounded, but while valid it is a real credential for a system holding PHI. The
+persistent browser profile at `~/.config/snq/browser-profile` keeps Okta's cookie so re-auth is
+usually a silent window blink rather than a full login.
+
+The session carries exactly the permissions the human has — no shared service account, no ACL
+bypass, and the audit trail shows the real user. A 403 on a write means the account lacks `itil`;
+that one genuinely does need IT.
+
 ## Machine-local files
 
 | Path | Mode | Contents |
 |---|---|---|
+| `~/.config/snq/session` | 600 | ServiceNow session cookie + CSRF token |
+| `~/.config/snq/browser-profile/` | 700 | Persistent Chromium profile (Okta cookie) |
 | `~/.config/dbq/env` | 600 | Mongo URIs, one per alias |
 | `~/.config/dbq/my.cnf` | 600 | MySQL option groups |
 | `~/.config/dbq/connections.local.conf` | 644 | Personal aliases and overrides |
@@ -114,6 +165,11 @@ None are tracked here. `.gitignore` blocks them as a backstop.
 | `DBQ_PING_TIMEOUT` | `20` | Connectivity test budget, seconds |
 | `DBQ_ALLOW_WRITE` | unset | Permit a mutation on an `rw` alias. Cannot override `ro`. |
 | `DBQ_CLAUDE_JSON` | `~/.claude.json` | MCP config path (testing) |
+| `SNQ_CONFIG_DIR` | `~/.config/snq` | Session/profile location (useful for testing) |
+| `SNQ_INSTANCE` | `config/instance.conf` | Target a different ServiceNow instance |
+| `SNQ_TIMEOUT` | `45` | curl timeout, seconds |
+
+See `.env.example` for the shape of every credential file — values documented, never real.
 
 ## Promoting a skill
 

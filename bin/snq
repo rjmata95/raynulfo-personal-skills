@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+# snq — ServiceNow from the command line, using a browser-captured SSO session.
+#
+# Auth model: ChenMed's ServiceNow sits behind Okta SAML, and its REST API only
+# accepts Basic auth or an OAuth bearer token — neither of which a federated
+# account can produce without IT registering an OAuth client. So instead we log
+# in through the browser once (real Okta SSO, real MFA) and reuse that session.
+#
+# See: skills/servicenow-tickets/SKILL.md
+set -euo pipefail
+
+# Resolve through symlinks — snq is normally invoked via ~/.local/bin/snq, and the
+# library sits next to the REAL script, not next to the link.
+_snq_self="${BASH_SOURCE[0]}"
+while [[ -L "$_snq_self" ]]; do
+  _snq_link="$(readlink "$_snq_self")"
+  case "$_snq_link" in
+    /*) _snq_self="$_snq_link" ;;
+    *)  _snq_self="$(dirname "$_snq_self")/$_snq_link" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$_snq_self")" && pwd)"
+# shellcheck source=_snq-lib.sh
+source "$SCRIPT_DIR/_snq-lib.sh"
+
+INCIDENT_FIELDS_SHORT="number,sys_id,state,priority,short_description,assigned_to,sys_created_on"
+INCIDENT_FIELDS_FULL="number,sys_id,state,priority,urgency,impact,short_description,description,assigned_to,assignment_group,caller_id,category,subcategory,cmdb_ci,opened_at,sys_created_on,sys_updated_on,resolved_at,close_code,close_notes,work_notes,comments"
+
+usage() {
+  cat <<'EOF'
+snq — ServiceNow CLI (browser-captured SSO session)
+
+AUTH
+  snq auth                          Open browser, do Okta SSO, capture session
+  snq whoami                        Who the current session belongs to
+  snq doctor                        Diagnose setup and session state
+
+INCIDENTS
+  snq inc list [opts]               List incidents
+  snq inc get <INC number|sys_id>   Full detail for one incident
+  snq inc create [opts]             Create an incident
+  snq inc update <INC> [opts]       Update fields on an incident
+  snq inc comment <INC> <text>      Add a customer-visible comment
+  snq inc worknote <INC> <text>     Add an internal work note
+  snq inc resolve <INC> --note <t>  Resolve (state 6) with close notes
+
+LIST OPTIONS
+  --state <n|active|open|resolved>  State filter (numeric or keyword)
+  --priority <n>                    1..5
+  --assigned-to <user sys_id|name>  Assignee
+  --group <name>                    Assignment group
+  --query "<encoded query>"         Raw sysparm_query, overrides other filters
+  --limit <n>                       Default 20
+  --order <field>                   Default sys_created_on, descending
+  --fields <a,b,c>                  Override returned fields
+
+CREATE / UPDATE OPTIONS
+  --desc <text>                     short_description
+  --details <text>                  description (long body)
+  --priority <n>  --urgency <n>  --impact <n>
+  --state <n>     --category <c>  --group <name>
+  --assign <user> --caller <user>
+  --field k=v                       Any raw field; repeatable
+
+GENERAL
+  --json                            Raw JSON instead of a table
+  --table <name>                    Operate on another table (default: incident)
+  -h, --help
+
+EXAMPLES
+  snq inc list --state active --priority 1
+  snq inc list --query "active=true^priority<=2" --limit 50
+  snq inc get INC0012345
+  snq inc create --desc "Eventing engine readiness probe regression" --priority 3
+  snq inc comment INC0012345 "Rolled back to 3.3.12, monitoring."
+  snq inc resolve INC0012345 --note "Config patch deployed via ArgoCD."
+EOF
+}
+
+# --- output ----------------------------------------------------------------
+
+render_table() {
+  # stdin: ServiceNow {"result":[...]} ; args: comma-separated field order
+  python3 -c '
+import json,sys
+fields=[f for f in sys.argv[1].split(",") if f]
+try: data=json.load(sys.stdin)
+except Exception as e:
+    print("snq: could not parse response as JSON:",e,file=sys.stderr); sys.exit(1)
+rows=data.get("result",[])
+if isinstance(rows,dict): rows=[rows]
+if not rows:
+    print("(no records matched)"); sys.exit(0)
+
+STATE={"1":"New","2":"In Progress","3":"On Hold","6":"Resolved","7":"Closed","8":"Canceled"}
+PRIO={"1":"1-Critical","2":"2-High","3":"3-Moderate","4":"4-Low","5":"5-Planning"}
+
+def flat(v):
+    # Reference fields arrive as {"value","link"} or a display string.
+    if isinstance(v,dict): return v.get("display_value") or v.get("value") or ""
+    return "" if v is None else str(v)
+
+def cell(f,v):
+    v=flat(v)
+    if f=="state": return STATE.get(v,v)
+    if f=="priority": return PRIO.get(v,v)
+    if f in ("sys_created_on","sys_updated_on","opened_at","resolved_at"): return v[:16]
+    return v
+
+hdr=[f.replace("_"," ") for f in fields]
+table=[[cell(f,r.get(f)) for f in fields] for r in rows]
+widths=[min(max([len(hdr[i])]+[len(r[i]) for r in table]),58) for i in range(len(fields))]
+
+def line(cells):
+    return "  ".join(c[:widths[i]].ljust(widths[i]) for i,c in enumerate(cells))
+
+print(line(hdr))
+print("  ".join("-"*w for w in widths))
+for r in table: print(line(r))
+print()
+print(f"{len(rows)} record(s)")
+' "$1"
+}
+
+render_detail() {
+  python3 -c '
+import json,sys
+try: data=json.load(sys.stdin)
+except Exception as e:
+    print("snq: could not parse response as JSON:",e,file=sys.stderr); sys.exit(1)
+rows=data.get("result",[])
+if isinstance(rows,dict): rows=[rows]
+if not rows: print("(not found)"); sys.exit(0)
+r=rows[0]
+STATE={"1":"New","2":"In Progress","3":"On Hold","6":"Resolved","7":"Closed","8":"Canceled"}
+def flat(v):
+    if isinstance(v,dict): return v.get("display_value") or v.get("value") or ""
+    return "" if v is None else str(v)
+order=["number","state","priority","urgency","impact","short_description","assigned_to",
+       "assignment_group","caller_id","category","subcategory","cmdb_ci","opened_at",
+       "sys_created_on","sys_updated_on","resolved_at","close_code","sys_id"]
+for k in order:
+    if k in r:
+        v=flat(r[k])
+        if k=="state": v=STATE.get(v,v)
+        if v: print(f"{k+chr(58):<20} {v}")
+for k in ("description","close_notes","work_notes","comments"):
+    v=flat(r.get(k))
+    if v:
+        print(); print(f"--- {k} ---"); print(v)
+'
+}
+
+# --- helpers ---------------------------------------------------------------
+
+# Resolve "INC0012345" to a sys_id; pass a sys_id straight through.
+resolve_incident() {
+  local ref="$1" tbl="$2"
+  if [[ "$ref" =~ ^[0-9a-f]{32}$ ]]; then printf '%s' "$ref"; return 0; fi
+  local resp sid
+  resp="$(snq_api GET "/api/now/table/$tbl?sysparm_query=number=$ref&sysparm_fields=sys_id&sysparm_limit=1")"
+  sid="$(snq_json_field "$resp" "result.0.sys_id")" \
+    || snq_die "no record found with number '$ref' on table '$tbl'"
+  [[ -n "$sid" ]] || snq_die "no record found with number '$ref' on table '$tbl'"
+  printf '%s' "$sid"
+}
+
+state_keyword() {
+  case "$1" in
+    active)   printf 'active=true' ;;
+    open)     printf 'active=true^stateIN1,2,3' ;;
+    resolved) printf 'state=6' ;;
+    closed)   printf 'state=7' ;;
+    *)        printf 'state=%s' "$1" ;;
+  esac
+}
+
+json_object() {
+  # args: k=v ... -> JSON object (python does the escaping)
+  python3 -c '
+import json,sys
+out={}
+for a in sys.argv[1:]:
+    k,_,v=a.partition("=")
+    out[k]=v
+print(json.dumps(out))
+' "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+cmd_auth()   { exec "$SCRIPT_DIR/snq-auth" "$@"; }
+cmd_doctor() { exec "$SCRIPT_DIR/snq-doctor" "$@"; }
+
+cmd_whoami() {
+  snq_require_session
+  local resp
+  resp="$(snq_api GET "/api/now/ui/user/current_user")"
+  if [[ "${SNQ_JSON:-0}" == 1 ]]; then printf '%s\n' "$resp"; return; fi
+  printf 'instance:      %s\n' "$SNQ_URL"
+  printf 'session age:   %s\n' "$(snq_session_age_human)"
+  [[ -n "${SNQ_CAPTURED_AT:-}" ]]   && printf 'captured at:   %s\n' "$SNQ_CAPTURED_AT"
+  local name id
+  name="$(snq_json_field "$resp" "result.user.name" || true)"
+  id="$(snq_json_field "$resp" "result.user.user_name" || true)"
+  [[ -n "$name" ]] && printf 'user:          %s\n' "$name"
+  [[ -n "$id"   ]] && printf 'user_name:     %s\n' "$id"
+  printf 'writes:        %s\n' "$([[ -n "${SNQ_USER_TOKEN:-}" ]] && echo "enabled (CSRF token present)" || echo "DISABLED (no g_ck — re-run snq auth)")"
+}
+
+cmd_inc() {
+  local sub="${1:-list}"; shift || true
+  local tbl="${SNQ_TABLE:-incident}"
+
+  case "$sub" in
+    list)
+      local q="" limit=20 order="sys_created_on" fields="$INCIDENT_FIELDS_SHORT"
+      local -a parts=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --state)       parts+=("$(state_keyword "$2")"); shift 2 ;;
+          --priority)    parts+=("priority=$2"); shift 2 ;;
+          --assigned-to) parts+=("assigned_to.name=$2"); shift 2 ;;
+          --group)       parts+=("assignment_group.name=$2"); shift 2 ;;
+          --query)       q="$2"; shift 2 ;;
+          --limit)       limit="$2"; shift 2 ;;
+          --order)       order="$2"; shift 2 ;;
+          --fields)      fields="$2"; shift 2 ;;
+          *) snq_die "unknown option for 'inc list': $1" ;;
+        esac
+      done
+      if [[ -z "$q" ]]; then
+        local IFS='^'; q="${parts[*]:-}"
+      fi
+      local path="/api/now/table/$tbl?sysparm_limit=$limit&sysparm_fields=$fields&sysparm_display_value=all&sysparm_exclude_reference_link=true"
+      [[ -n "$q" ]] && path+="&sysparm_query=$(printf '%s' "${q}^ORDERBYDESC${order}" | sed 's/ /%20/g')"
+      [[ -z "$q" ]] && path+="&sysparm_query=ORDERBYDESC$order"
+      snq_require_session
+      local resp; resp="$(snq_api GET "$path")"
+      if [[ "${SNQ_JSON:-0}" == 1 ]]; then printf '%s\n' "$resp"; else printf '%s' "$resp" | render_table "$fields"; fi
+      ;;
+
+    get)
+      [[ $# -ge 1 ]] || snq_die "usage: snq inc get <INC number|sys_id>"
+      snq_require_session
+      local sid; sid="$(resolve_incident "$1" "$tbl")"
+      local resp; resp="$(snq_api GET "/api/now/table/$tbl/$sid?sysparm_display_value=all&sysparm_exclude_reference_link=true")"
+      if [[ "${SNQ_JSON:-0}" == 1 ]]; then printf '%s\n' "$resp"; else printf '%s' "$resp" | render_detail; fi
+      ;;
+
+    create)
+      local -a kv=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --desc)     kv+=("short_description=$2"); shift 2 ;;
+          --details)  kv+=("description=$2"); shift 2 ;;
+          --priority) kv+=("priority=$2"); shift 2 ;;
+          --urgency)  kv+=("urgency=$2"); shift 2 ;;
+          --impact)   kv+=("impact=$2"); shift 2 ;;
+          --state)    kv+=("state=$2"); shift 2 ;;
+          --category) kv+=("category=$2"); shift 2 ;;
+          --group)    kv+=("assignment_group=$2"); shift 2 ;;
+          --assign)   kv+=("assigned_to=$2"); shift 2 ;;
+          --caller)   kv+=("caller_id=$2"); shift 2 ;;
+          --field)    kv+=("$2"); shift 2 ;;
+          *) snq_die "unknown option for 'inc create': $1" ;;
+        esac
+      done
+      [[ ${#kv[@]} -gt 0 ]] || snq_die "nothing to create; at minimum pass --desc \"...\""
+      snq_require_session
+      local body; body="$(json_object "${kv[@]}")"
+      local resp; resp="$(snq_api POST "/api/now/table/$tbl?sysparm_fields=$INCIDENT_FIELDS_SHORT" "$body")"
+      if [[ "${SNQ_JSON:-0}" == 1 ]]; then printf '%s\n' "$resp"; return; fi
+      local num; num="$(snq_json_field "$resp" "result.number" || true)"
+      printf 'created: %s\n' "${num:-(see JSON)}"
+      [[ -n "$num" ]] && printf 'url:     %s/nav_to.do?uri=%s.do?sysparm_query=number=%s\n' "$SNQ_URL" "$tbl" "$num"
+      ;;
+
+    update)
+      [[ $# -ge 1 ]] || snq_die "usage: snq inc update <INC> [--field k=v ...]"
+      local ref="$1"; shift
+      local -a kv=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --desc)     kv+=("short_description=$2"); shift 2 ;;
+          --details)  kv+=("description=$2"); shift 2 ;;
+          --priority) kv+=("priority=$2"); shift 2 ;;
+          --urgency)  kv+=("urgency=$2"); shift 2 ;;
+          --impact)   kv+=("impact=$2"); shift 2 ;;
+          --state)    kv+=("state=$2"); shift 2 ;;
+          --category) kv+=("category=$2"); shift 2 ;;
+          --group)    kv+=("assignment_group=$2"); shift 2 ;;
+          --assign)   kv+=("assigned_to=$2"); shift 2 ;;
+          --caller)   kv+=("caller_id=$2"); shift 2 ;;
+          --field)    kv+=("$2"); shift 2 ;;
+          *) snq_die "unknown option for 'inc update': $1" ;;
+        esac
+      done
+      [[ ${#kv[@]} -gt 0 ]] || snq_die "nothing to update"
+      snq_require_session
+      local sid; sid="$(resolve_incident "$ref" "$tbl")"
+      local body; body="$(json_object "${kv[@]}")"
+      local resp; resp="$(snq_api PATCH "/api/now/table/$tbl/$sid?sysparm_fields=$INCIDENT_FIELDS_SHORT" "$body")"
+      if [[ "${SNQ_JSON:-0}" == 1 ]]; then printf '%s\n' "$resp"; else printf 'updated: %s\n' "$ref"; fi
+      ;;
+
+    comment|worknote)
+      [[ $# -ge 2 ]] || snq_die "usage: snq inc $sub <INC> \"<text>\""
+      local ref="$1"; shift
+      local text="$*"
+      local field="comments"; [[ "$sub" == worknote ]] && field="work_notes"
+      snq_require_session
+      local sid; sid="$(resolve_incident "$ref" "$tbl")"
+      local body; body="$(json_object "$field=$text")"
+      snq_api PATCH "/api/now/table/$tbl/$sid?sysparm_fields=number" "$body" >/dev/null
+      printf 'added %s to %s\n' "$([[ "$sub" == worknote ]] && echo "work note" || echo "comment")" "$ref"
+      ;;
+
+    resolve)
+      [[ $# -ge 1 ]] || snq_die "usage: snq inc resolve <INC> --note \"<text>\" [--code <close_code>]"
+      local ref="$1"; shift
+      local note="" code="Solved (Permanently)"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --note) note="$2"; shift 2 ;;
+          --code) code="$2"; shift 2 ;;
+          *) snq_die "unknown option for 'inc resolve': $1" ;;
+        esac
+      done
+      [[ -n "$note" ]] || snq_die "--note is required; ServiceNow rejects a resolve with empty close notes"
+      snq_require_session
+      local sid; sid="$(resolve_incident "$ref" "$tbl")"
+      local body; body="$(json_object "state=6" "close_code=$code" "close_notes=$note")"
+      snq_api PATCH "/api/now/table/$tbl/$sid?sysparm_fields=number" "$body" >/dev/null
+      printf 'resolved: %s\n' "$ref"
+      ;;
+
+    *) snq_die "unknown 'inc' subcommand: $sub (try: list get create update comment worknote resolve)" ;;
+  esac
+}
+
+# --- arg parse -------------------------------------------------------------
+
+SNQ_JSON=0
+SNQ_TABLE=""
+declare -a ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     SNQ_JSON=1; shift ;;
+    --table)    SNQ_TABLE="$2"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    *)          ARGS+=("$1"); shift ;;
+  esac
+done
+export SNQ_JSON SNQ_TABLE
+
+[[ ${#ARGS[@]} -gt 0 ]] || { usage; exit 0; }
+
+cmd="${ARGS[0]}"
+rest=("${ARGS[@]:1}")
+
+case "$cmd" in
+  auth)             cmd_auth   "${rest[@]+"${rest[@]}"}" ;;
+  doctor)           cmd_doctor "${rest[@]+"${rest[@]}"}" ;;
+  whoami)           cmd_whoami "${rest[@]+"${rest[@]}"}" ;;
+  inc|incident)     cmd_inc    "${rest[@]+"${rest[@]}"}" ;;
+  help)             usage ;;
+  *) snq_die "unknown command: $cmd  (try: snq --help)" ;;
+esac

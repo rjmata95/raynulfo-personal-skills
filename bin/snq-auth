@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# snq-auth — capture a ServiceNow session by doing real Okta SSO in a browser.
+#
+# TTY-GATED ON PURPOSE. An agent must not run this: it drives an interactive
+# login and handles a live production session token. Agents print the command
+# and stop. Same contract as `dbq init`.
+#
+# How it works
+#   1. Launches a Playwright-driven Chromium with a PERSISTENT profile.
+#   2. You complete Okta SSO (password + MFA) in that window, like normal.
+#   3. Once landed on the instance, it reads the session cookies and the CSRF
+#      token (window.g_ck) and writes them to ~/.config/snq/session (chmod 600).
+#   4. The browser closes. `snq` then works as a plain CLI until the session
+#      expires (~30 min idle, ~8 h absolute), at which point you re-run this.
+#
+# The persistent profile means the SECOND run usually needs no interaction at
+# all — Okta's own session cookie is still in the profile, so it silently
+# re-lands and re-captures.
+set -euo pipefail
+
+_snq_self="${BASH_SOURCE[0]}"
+while [[ -L "$_snq_self" ]]; do
+  _snq_link="$(readlink "$_snq_self")"
+  case "$_snq_link" in
+    /*) _snq_self="$_snq_link" ;;
+    *)  _snq_self="$(dirname "$_snq_self")/$_snq_link" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$_snq_self")" && pwd)"
+# shellcheck source=_snq-lib.sh
+source "$SCRIPT_DIR/_snq-lib.sh"
+
+HEADLESS=0
+[[ "${1:-}" == "--headless" ]] && HEADLESS=1   # only viable if Okta needs nothing
+
+snq_load_instance
+
+# --- TTY gate --------------------------------------------------------------
+if [[ ! -t 0 || ! -t 1 ]]; then
+  cat >&2 <<EOF
+snq auth: refusing to run without a terminal.
+
+This command performs an interactive SSO login and handles a live production
+session token, so it is restricted to humans in a real terminal window.
+
+If you are an agent: print the two lines below and stop. Do not try to work
+around this.
+
+  Open a terminal and run:
+      snq auth
+
+Then re-run whatever you were doing.
+EOF
+  exit 2
+fi
+
+# --- deps ------------------------------------------------------------------
+command -v node >/dev/null 2>&1 || snq_die "node not found (needed to drive the browser)"
+snq_have_python || snq_die "python3 not found"
+
+PROFILE_DIR="$SNQ_CFG_DIR/browser-profile"
+snq_ensure_cfg_dir
+mkdir -p "$PROFILE_DIR"
+chmod 700 "$PROFILE_DIR"
+
+# Resolve a playwright module. Prefer an existing install; offer to add one.
+PW_RESOLVED="$(node -e '
+const paths=[];
+try{paths.push(require.resolve("playwright"))}catch{}
+try{paths.push(require.resolve("playwright-core"))}catch{}
+console.log(paths[0]||"");
+' 2>/dev/null || true)"
+
+if [[ -z "$PW_RESOLVED" ]]; then
+  cat <<EOF
+snq auth needs the Playwright node module to drive the browser.
+
+Install it once, globally:
+
+    npm install -g playwright
+    npx playwright install chromium
+
+Then re-run: snq auth
+EOF
+  exit 1
+fi
+
+PW_ROOT="$(node -e '
+const p=require.resolve("playwright").replace(/\/lib\/.*$/,"");
+console.log(p);
+' 2>/dev/null || dirname "$PW_RESOLVED")"
+
+echo "snq auth"
+echo "  instance: $SNQ_URL"
+echo "  profile:  $PROFILE_DIR"
+echo ""
+echo "A browser window will open. Complete Okta SSO if prompted."
+echo "Once you reach the ServiceNow homepage, the session is captured automatically."
+echo ""
+
+TMP_OUT="$(mktemp "${TMPDIR:-/tmp}/snq-auth.XXXXXX")"
+trap 'rm -f "$TMP_OUT"' EXIT
+
+NODE_PATH="$(dirname "$PW_ROOT")" \
+SNQ_URL="$SNQ_URL" \
+SNQ_PROFILE="$PROFILE_DIR" \
+SNQ_HEADLESS="$HEADLESS" \
+SNQ_OUT="$TMP_OUT" \
+node <<'NODE'
+const path = require('path');
+let chromium;
+try { ({ chromium } = require('playwright')); }
+catch { ({ chromium } = require('playwright-core')); }
+
+const INSTANCE = process.env.SNQ_URL;
+const PROFILE  = process.env.SNQ_PROFILE;
+const OUT      = process.env.SNQ_OUT;
+const HEADLESS = process.env.SNQ_HEADLESS === '1';
+const fs = require('fs');
+
+(async () => {
+  const ctx = await chromium.launchPersistentContext(PROFILE, {
+    headless: HEADLESS,
+    viewport: null,
+    args: ['--no-first-run', '--no-default-browser-check'],
+  });
+
+  const page = ctx.pages()[0] || await ctx.newPage();
+
+  // navpage.do is the authenticated shell — it carries window.g_ck (the CSRF
+  // token). A raw /api/ URL will NOT have it, which is why we land here.
+  await page.goto(`${INSTANCE}/navpage.do`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+
+  const deadlineMs = Date.now() + 5 * 60 * 1000;   // 5 minutes to finish SSO
+  let token = null;
+
+  while (Date.now() < deadlineMs) {
+    const url = page.url();
+    const onInstance = url.startsWith(INSTANCE);
+
+    if (onInstance) {
+      // g_ck only exists once a real authenticated ServiceNow page has loaded.
+      token = await page.evaluate(() => (typeof window.g_ck === 'string' && window.g_ck) || null)
+                        .catch(() => null);
+      if (token) break;
+
+      // Landed on the instance but no token yet — could still be the SSO bounce.
+      await page.waitForTimeout(1200);
+      if (!/navpage|home|nav_to/.test(page.url())) {
+        await page.goto(`${INSTANCE}/navpage.do`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      }
+      continue;
+    }
+
+    // Still on Okta (or wherever) — wait for the human.
+    await page.waitForTimeout(1500);
+  }
+
+  if (!token) {
+    console.error('snq auth: timed out waiting for an authenticated ServiceNow page.');
+    console.error('          If SSO completed but this still failed, the instance may not expose window.g_ck;');
+    console.error('          reads would still work — file the session without a token using SNQ_ALLOW_NO_TOKEN=1.');
+    await ctx.close();
+    process.exit(3);
+  }
+
+  const cookies = await ctx.cookies(INSTANCE);
+  const wanted = cookies
+    .filter(c => /JSESSIONID|glide_|BIGipServer|__CJ/.test(c.name))
+    .map(c => `${c.name}=${c.value}`)
+    .join('; ');
+
+  if (!wanted) {
+    console.error('snq auth: no ServiceNow session cookies found on the context.');
+    await ctx.close();
+    process.exit(4);
+  }
+
+  let who = '';
+  try {
+    who = await page.evaluate(() =>
+      (window.NOW && window.NOW.user && (window.NOW.user.userName || window.NOW.user.name)) || '');
+  } catch {}
+
+  fs.writeFileSync(OUT, JSON.stringify({ cookie: wanted, token, user: who }), { mode: 0o600 });
+  console.log('snq auth: session captured' + (who ? ` for ${who}` : ''));
+  await ctx.close();
+})().catch(e => { console.error('snq auth: ' + e.message); process.exit(1); });
+NODE
+
+[[ -s "$TMP_OUT" ]] || snq_die "capture produced no session data"
+
+# Write the session file with a restrictive umask from the start.
+COOKIE="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["cookie"])' "$TMP_OUT")"
+TOKEN="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d.get("token") or "")' "$TMP_OUT")"
+WHO="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d.get("user") or "")' "$TMP_OUT")"
+
+OLD_UMASK="$(umask)"
+umask 077
+cat > "$SNQ_SESSION_FILE" <<EOF
+# ServiceNow session captured by 'snq auth' — DO NOT COMMIT, DO NOT SHARE.
+# This is a live production session for $SNQ_URL.
+# Expires on its own: ~30 min idle, ~8 h absolute. Re-run 'snq auth' to refresh.
+SNQ_COOKIE='$COOKIE'
+SNQ_USER_TOKEN='$TOKEN'
+SNQ_CAPTURED_AT='$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+SNQ_CAPTURED_USER='$WHO'
+EOF
+umask "$OLD_UMASK"
+chmod 600 "$SNQ_SESSION_FILE"
+
+echo ""
+echo "  session file: $SNQ_SESSION_FILE (chmod 600)"
+[[ -n "$TOKEN" ]] && echo "  writes:       enabled" || echo "  writes:       DISABLED (no g_ck captured — reads only)"
+echo ""
+echo "Verify:  snq whoami"

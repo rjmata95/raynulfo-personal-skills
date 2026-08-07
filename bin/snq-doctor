@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# snq-doctor — read-only diagnosis of snq setup and session state.
+#
+# AGENT-SAFE: prints no secret values. Cookie and token are reported only as
+# present/absent with a length, never echoed.
+set -uo pipefail
+
+_snq_self="${BASH_SOURCE[0]}"
+while [[ -L "$_snq_self" ]]; do
+  _snq_link="$(readlink "$_snq_self")"
+  case "$_snq_link" in
+    /*) _snq_self="$_snq_link" ;;
+    *)  _snq_self="$(dirname "$_snq_self")/$_snq_link" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$_snq_self")" && pwd)"
+# shellcheck source=_snq-lib.sh
+source "$SCRIPT_DIR/_snq-lib.sh"
+
+PROBLEMS=0
+problem() { printf '  [!] %s\n' "$*"; PROBLEMS=$((PROBLEMS+1)); }
+ok()      { printf '  [ok] %s\n' "$*"; }
+info()    { printf '       %s\n' "$*"; }
+
+snq_load_instance
+
+echo "TOOLS"
+for t in curl python3 node; do
+  if command -v "$t" >/dev/null 2>&1; then ok "$t"; else problem "$t not found"; fi
+done
+if node -e 'try{require.resolve("playwright")}catch{try{require.resolve("playwright-core")}catch{process.exit(1)}}' 2>/dev/null; then
+  ok "playwright module (needed only by 'snq auth')"
+else
+  problem "playwright module missing — 'snq auth' cannot open a browser. Fix: npm install -g playwright && npx playwright install chromium"
+fi
+if command -v snq >/dev/null 2>&1; then ok "snq on PATH ($(command -v snq))"; else
+  problem "snq not on PATH. Fix: ln -sfn $SCRIPT_DIR/snq ~/.local/bin/snq"
+fi
+
+echo ""
+echo "CONFIG"
+info "instance: $SNQ_URL"
+if [[ -f "$SNQ_INSTANCE_CONF" ]]; then ok "instance.conf present"; else
+  info "instance.conf absent — using built-in default"
+fi
+if [[ -d "$SNQ_CFG_DIR" ]]; then
+  perms="$(stat -f '%Lp' "$SNQ_CFG_DIR" 2>/dev/null)"
+  if [[ "$perms" == "700" ]]; then ok "$SNQ_CFG_DIR (700)"; else problem "$SNQ_CFG_DIR has mode $perms, expected 700. Fix: chmod 700 $SNQ_CFG_DIR"; fi
+else
+  problem "$SNQ_CFG_DIR does not exist — run 'snq auth' to create it"
+fi
+
+echo ""
+echo "SESSION"
+if snq_session_exists; then
+  perms="$(stat -f '%Lp' "$SNQ_SESSION_FILE" 2>/dev/null)"
+  if [[ "$perms" == "600" ]]; then ok "session file present (600)"; else
+    problem "session file has mode $perms, expected 600. Fix: chmod 600 $SNQ_SESSION_FILE"
+  fi
+  age_h="$(snq_session_age_human)"
+  age_s="$(snq_session_age)"
+  info "captured: $age_h ago"
+  if snq_load_session 2>/dev/null; then
+    ok "cookie present (${#SNQ_COOKIE} chars)"
+    if [[ -n "${SNQ_USER_TOKEN:-}" ]]; then ok "CSRF token present — writes enabled"; else
+      problem "no CSRF token (g_ck) — reads work, every write will fail. Fix: re-run 'snq auth'"
+    fi
+    [[ -n "${SNQ_CAPTURED_USER:-}" ]] && info "captured as: $SNQ_CAPTURED_USER"
+    # ServiceNow default: 30 min idle timeout. Warn before the user gets a 401.
+    if [[ -n "$age_s" ]] && (( age_s > 1800 )); then
+      problem "session is older than the 30-minute idle window — likely expired. Fix: snq auth"
+    fi
+  else
+    problem "session file present but unreadable or malformed. Fix: re-run 'snq auth'"
+  fi
+else
+  problem "no session file. Fix: run 'snq auth' in a terminal (humans only)"
+fi
+
+echo ""
+echo "CONNECTIVITY"
+if ! command -v curl >/dev/null 2>&1; then
+  problem "curl missing, skipping"
+else
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$SNQ_URL/api/now/table/incident?sysparm_limit=1" 2>/dev/null)"
+  case "$code" in
+    000) problem "cannot reach $SNQ_URL (network/VPN?)" ;;
+    401) ok "instance reachable, API requires auth (expected)" ;;
+    200) ok "instance reachable" ;;
+    *)   info "instance returned HTTP $code unauthenticated" ;;
+  esac
+
+  if snq_load_session 2>/dev/null; then
+    live="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+      -H "Accept: application/json" -H "Cookie: $SNQ_COOKIE" \
+      "$SNQ_URL/api/now/table/incident?sysparm_limit=1&sysparm_fields=number" 2>/dev/null)"
+    case "$live" in
+      200) ok "session is LIVE — authenticated read succeeded" ;;
+      401|302) problem "session rejected (HTTP $live) — expired. Fix: snq auth" ;;
+      403) problem "authenticated but forbidden (403) — your roles may not include read on incident" ;;
+      *)   problem "unexpected HTTP $live on authenticated read" ;;
+    esac
+  fi
+fi
+
+echo ""
+echo "GIT HYGIENE"
+if [[ "$SNQ_SESSION_FILE" == "$SNQ_REPO_ROOT"* ]]; then
+  problem "session file lives INSIDE the repo — it must not. Expected $SNQ_CFG_DIR"
+else
+  ok "session file is outside the repo ($SNQ_CFG_DIR)"
+fi
+if git -C "$SNQ_REPO_ROOT" check-ignore -q session 2>/dev/null; then
+  ok "'session' is gitignored as a backstop"
+else
+  info "consider adding 'session' to .gitignore as a backstop"
+fi
+tracked="$(git -C "$SNQ_REPO_ROOT" ls-files 2>/dev/null | grep -cE '(^|/)session$|\.env$' || true)"
+if [[ "${tracked:-0}" == "0" ]]; then ok "no session/.env files tracked by git"; else
+  problem "git is tracking $tracked file(s) that look like credentials"
+fi
+
+echo ""
+printf 'snq_doctor_problems=%s\n' "$PROBLEMS"
+printf 'snq_doctor_session=%s\n' "$(snq_session_exists && echo present || echo absent)"
+printf 'snq_doctor_writes=%s\n' "$([[ -n "${SNQ_USER_TOKEN:-}" ]] && echo enabled || echo disabled)"
+
+[[ "$PROBLEMS" == 0 ]] || exit 1

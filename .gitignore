@@ -1,6 +1,7 @@
 # Credentials and machine-local config never belong in this repo.
-# The real ones live in ~/.config/dbq/ (chmod 600). These patterns are a
-# backstop in case anything is ever copied into the working tree by mistake.
+# The real ones live in ~/.config/dbq/ and ~/.config/snq/ (chmod 600). These
+# patterns are a backstop in case anything is ever copied into the working tree
+# by mistake.
 env
 .env
 .env.*
@@ -8,10 +9,18 @@ env
 my.cnf
 *.local.conf
 connections.local.conf
+instance.local.conf
 mcp-rollback.json
 skipped
 *.pem
 *.key
+
+# snq — browser-captured ServiceNow session. Live production credential.
+session
+session.*
+browser-profile/
+cookies.json
+storage-state.json
 
 # Scratch — throwaway queries live in ~/.dbq/scratch, not here.
 scratch/
