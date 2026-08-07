@@ -113,8 +113,12 @@ else
   esac
 
   if snq_load_session 2>/dev/null; then
+    # X-UserToken is required on reads too, not just writes — a cookie alone gets
+    # a 401 "Required to provide Auth information". Must match snq_api's headers,
+    # or doctor reports a perfectly good session as expired.
     live="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
       -H "Accept: application/json" -H "Cookie: $SNQ_COOKIE" \
+      ${SNQ_USER_TOKEN:+-H "X-UserToken: $SNQ_USER_TOKEN"} \
       "$SNQ_URL/api/now/table/incident?sysparm_limit=1&sysparm_fields=number" 2>/dev/null)"
     case "$live" in
       200) ok "session is LIVE — authenticated read succeeded" ;;

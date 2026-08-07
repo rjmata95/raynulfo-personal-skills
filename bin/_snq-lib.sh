@@ -111,9 +111,19 @@ snq_api() {
         snq_die "this session has no CSRF token (g_ck), so writes are impossible.
        Re-run: snq auth   (the capture step must read window.g_ck)"
       fi
-      args+=(-H "X-UserToken: $SNQ_USER_TOKEN")
       ;;
   esac
+
+  # Send X-UserToken on EVERY method, reads included. A session cookie alone is
+  # not enough for /api/now/: the instance answers 401 with
+  #   {"error":{"message":"User is not authenticated",
+  #             "detail":"Required to provide Auth information"}}
+  # even on a cookie captured seconds earlier. The g_ck token is what makes a
+  # browser-derived session acceptable to the REST layer, so it is not a
+  # write-only concern — it is the auth signal.
+  if [[ -n "${SNQ_USER_TOKEN:-}" ]]; then
+    args+=(-H "X-UserToken: $SNQ_USER_TOKEN")
+  fi
 
   if [[ -n "$body" ]]; then
     args+=(-H "Content-Type: application/json" --data-binary "$body")
@@ -129,7 +139,8 @@ snq_api() {
     401|302)
       snq_die "session expired or not authenticated (HTTP $code).
        Session age: $(snq_session_age_human). ServiceNow drops idle sessions after ~30 min.
-       Re-authenticate: snq auth"
+       Re-authenticate: snq auth
+       ServiceNow said: $(printf '%s' "$payload" | head -c 400)"
       ;;
     403)
       snq_die "HTTP 403 — authenticated, but your ServiceNow roles don't permit this.

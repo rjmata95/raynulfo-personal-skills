@@ -2,6 +2,31 @@
 
 Ordered by how often each actually happens.
 
+## 401 on a session captured seconds ago
+
+Distinguish this from the idle timeout below by **session age**. If `snq doctor` says the session
+was captured seconds or a couple of minutes ago and reads still 401, it is not expiry — telling
+the user to re-run `snq auth` will loop forever.
+
+ServiceNow returns:
+
+```
+{"error":{"message":"User is not authenticated",
+          "detail":"Required to provide Auth information"},"status":"failure"}
+```
+
+Cause: `/api/now/` will not accept a session cookie on its own. The `g_ck` CSRF token
+(`X-UserToken`) is required on **reads as well as writes** — it is the auth signal for a
+browser-derived session, not a write-only guard. Any code path that sends `Cookie` without
+`X-UserToken` gets a 401 no matter how fresh the cookie is.
+
+Fixed in `_snq-lib.sh` (`snq_api` sends the header on every method) and in `snq-doctor`'s
+connectivity probe. If it resurfaces, check that both places still send it — a doctor probe that
+omits the header reports a perfectly good session as expired.
+
+Note the 401 handler prints ServiceNow's own message. `"User is not authenticated"` on a fresh
+session means this; a bare 401 on an old one means the timeout below.
+
 ## 401 on every command, right after a successful run
 
 The session hit ServiceNow's ~30-minute idle timeout. Normal, not a bug.
