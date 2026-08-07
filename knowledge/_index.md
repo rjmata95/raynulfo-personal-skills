@@ -21,7 +21,21 @@ What each alias has documented, and how fresh it is. **Read the relevant
 | `practice-mgmt` | mongo | prod | databases | yes | 2026-08-07 |
 | `tenant-mgmt` | mongo | prod | databases | yes | 2026-08-07 |
 | `medication-nonprod` | mongo | nonprod | databases | yes | 2026-08-07 |
-| `mysql-qa` | mysql | qa | — | — | not verified (ERROR 2059) |
+| `mysql-qa` | mysql | qa | — | — | **not verified** (ERROR 2059 — see below) |
+
+### `mysql-qa` is not yet migrated
+
+It is the one alias whose MCP server is still in place, because the CLI cannot reach it: the
+QA server authenticates via PAM/LDAP and needs `mysql_clear_password` (ERROR 2059). Fix it in
+a real terminal, then the MCP server can be removed:
+
+```bash
+dbq init --alias mysql-qa      # press [a] to enable cleartext + TLS, then [t] to test
+dbq doctor                     # confirm it reports ok
+claude mcp remove mysql-qa -s user
+```
+
+Details in `../skills/setting-up-dbq/references/troubleshooting.md`.
 
 Legend: `—` not started · `databases` cluster inventory mapped, no field maps yet ·
 `collection` at least one collection fully documented · `table sizes` inventory + size profile
