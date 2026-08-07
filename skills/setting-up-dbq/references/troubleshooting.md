@@ -89,6 +89,34 @@ DBQ_PING_TIMEOUT=45 dbq doctor
 **`authentication failed`** — credential is stale or wrong: `dbq init --alias <alias>`.
 Rotated Atlas passwords are the usual cause.
 
+**`ERROR 2059 ... Authentication plugin 'mysql_clear_password' cannot be loaded`**
+
+The server authenticates through PAM/LDAP and needs the password sent using
+`mysql_clear_password`. The MySQL client refuses to load that plugin by default, because
+cleartext is unsafe on an unencrypted connection. (Node-based MySQL drivers — including the
+old MCP server — negotiate this silently, which is why the CLI surfaces a problem the MCP
+server appeared not to have.)
+
+Fix it per alias, in a real terminal:
+
+```bash
+dbq init --alias mysql-qa      # then press [a], confirm, and [t] to test
+```
+
+`[a]` writes two lines into that alias's `my.cnf` group:
+
+```
+enable-cleartext-plugin
+ssl-mode = REQUIRED
+```
+
+**TLS is not optional here.** `enable-cleartext-plugin` alone would put the password on the
+wire in plain text, so `dbq` always pairs it with `ssl-mode = REQUIRED`. If the server does
+not support TLS, stop and raise it with the DBA rather than dropping the ssl-mode line.
+
+These options are preserved when `dbq init` regenerates `my.cnf`, so the fix is one-time.
+`[a]` again toggles it back off.
+
 **`connected, but user lacks permission`** — the connection works; the account has no read
 grant on that database. Not fixable in `dbq`. Skip the alias (`[s]`) and raise access
 separately.

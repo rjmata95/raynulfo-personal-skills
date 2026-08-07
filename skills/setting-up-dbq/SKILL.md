@@ -120,6 +120,10 @@ Every alias the user configured should be `ok`. Interpret failures from `dbq_doc
 - `host not found` / `timed out` → ask whether they are on VPN, then re-run. Atlas
   private-link and `.chenmed.local` both require it.
 - `authentication failed` → `dbq init --alias <name>`.
+- `server needs cleartext auth (PAM/LDAP)` → the server wants `mysql_clear_password`
+  (ERROR 2059). Have the user run `dbq init --alias <name>` in a terminal and press `[a]`,
+  which enables cleartext **with TLS required**. One-time; survives regeneration. Details in
+  `references/troubleshooting.md`.
 - `connected, but user lacks permission` → a real grant issue; not fixable here. Suggest they
   skip that alias for now (`[s]`) and raise access separately.
 - `skipped` → deliberate. Not a problem; exclude it from the cutover.

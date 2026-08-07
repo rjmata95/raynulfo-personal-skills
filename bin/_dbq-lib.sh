@@ -158,6 +158,24 @@ dbq_mysql_group_exists() {
   [ -r "$MYCNF" ] && grep -q "^\[client-$1\]" "$MYCNF" 2>/dev/null
 }
 
+# Echo the body of a [client-<alias>] group from my.cnf.
+dbq_mysql_group_body() {
+  [ -r "$MYCNF" ] || return 1
+  awk -v g="[client-$1]" '$0==g{f=1;next} /^\[/{f=0} f' "$MYCNF"
+}
+
+# Echo any non-connection options set on an alias, one per line.
+#
+# Some servers need extra client options — the common case is
+# `enable-cleartext-plugin` for PAM/LDAP auth (ERROR 2059). These are set once and
+# must survive `dbq init` regenerating my.cnf, so they are read back here rather
+# than being reconstructed from the registry.
+dbq_mysql_extra_options() {
+  dbq_mysql_group_body "$1" 2>/dev/null \
+    | grep -vE '^[[:space:]]*(host|port|user|password|database)[[:space:]]*=' \
+    | grep -vE '^[[:space:]]*$'
+}
+
 dbq_has_credential() {
   case "$2" in
     mongo) dbq_mongo_uri "$1" >/dev/null 2>&1 ;;
@@ -271,15 +289,35 @@ dbq_ping_mongo() {
   return 1
 }
 
-# dbq_ping_mysql_direct <host> <port> <user> <pass>
-# Password goes through MYSQL_PWD, never argv.
+# dbq_ping_mysql_direct <host> <port> <user> <pass> [extra-options]
+# Password goes through MYSQL_PWD, never argv. extra-options is newline-separated
+# my.cnf-style lines (e.g. "enable-cleartext-plugin"), translated to CLI flags so a
+# fix can be verified before it is written to disk.
 dbq_ping_mysql_direct() {
-  local h="$1" p="${2:-3306}" u="$3" pw="$4" rc ct
+  local h="$1" p="${2:-3306}" u="$3" pw="$4" extra="${5:-}" rc ct line key val
   command -v mysql >/dev/null 2>&1 || { DBQ_PING_OUT="mysql not installed"; return 1; }
   ct="${DBQ_PING_TIMEOUT:-20}"
 
-  MYSQL_PWD="$pw" _dbq_run_guarded mysql -h "$h" -P "$p" -u "$u" \
-    --batch --skip-column-names --connect-timeout="$ct" -e 'SELECT 1'
+  # Translate option-file lines into argv flags. Safe: these are option names, not
+  # secrets — the password still travels via MYSQL_PWD.
+  set -- -h "$h" -P "$p" -u "$u" --batch --skip-column-names --connect-timeout="$ct"
+  if [ -n "$extra" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      line=$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+      case "$line" in
+        ''|\#*) continue ;;
+        *=*) key=$(printf '%s' "${line%%=*}" | sed -E 's/[[:space:]]+$//')
+             val=$(printf '%s' "${line#*=}" | sed -E 's/^[[:space:]]+//')
+             set -- "$@" "--${key}=${val}" ;;
+        *)   set -- "$@" "--${line}" ;;
+      esac
+    done <<EOF
+$extra
+EOF
+  fi
+
+  MYSQL_PWD="$pw" _dbq_run_guarded mysql "$@" -e 'SELECT 1'
   rc=$?
 
   if [ "$rc" -eq 0 ] && printf '%s' "$DBQ_RUN_OUT" | grep -q '1'; then DBQ_PING_OUT=""; return 0; fi
@@ -308,6 +346,11 @@ dbq_ping_mysql_group() {
 dbq_ping_hint() {
   local out="$1"
   case "$out" in
+    # ERROR 2059: the server wants a plugin the client refuses to load. Almost
+    # always mysql_clear_password (PAM/LDAP auth), which the client blocks unless
+    # explicitly enabled because it sends the password in the clear.
+    *2059*|*"mysql_clear_password"*|*"plugin cannot be loaded"*|*"Authentication plugin"*)
+      printf 'server needs cleartext auth (PAM/LDAP) — run: dbq init --alias <alias>, then [a]' ;;
     *"Authentication failed"*|*"Access denied"*|*"bad auth"*)
       printf 'authentication failed — wrong user or password' ;;
     *ENOTFOUND*|*"Unknown MySQL server"*|*"Name or service not known"*|*"getaddrinfo"*)

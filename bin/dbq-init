@@ -101,7 +101,7 @@ atomic_write() {
 
 # Parallel arrays indexed alongside the registry, since bash 3.2 has no
 # associative arrays. CRED_VAL holds the secret; CRED_SRC where it came from.
-CRED_ALIAS=(); CRED_VAL=(); CRED_SRC=()
+CRED_ALIAS=(); CRED_VAL=(); CRED_SRC=(); CRED_OPTS=()
 
 cred_index() {
   local want="$1" i n="${#CRED_ALIAS[@]}"
@@ -117,18 +117,27 @@ cred_get() { local i; i=$(cred_index "$1") || return 1; printf '%s' "${CRED_VAL[
 cred_src() { local i; i=$(cred_index "$1") || return 1; printf '%s' "${CRED_SRC[$i]}"; }
 cred_has() { local v; v=$(cred_get "$1" 2>/dev/null) && [ -n "$v" ]; }
 
+# Extra my.cnf client options for a MySQL alias, newline-separated. Preserved
+# across regeneration so a one-time fix (e.g. enable-cleartext-plugin) sticks.
+cred_opts()     { local i; i=$(cred_index "$1") || return 1; printf '%s' "${CRED_OPTS[$i]}"; }
+cred_set_opts() { local i; i=$(cred_index "$1") || return 1; CRED_OPTS[$i]="$2"; }
+
 cred_set() {
-  local a="$1" v="$2" s="$3" i
+  local a="$1" v="$2" s="$3" o="${4:-}" i
   if i=$(cred_index "$a"); then
     CRED_VAL[$i]="$v"; CRED_SRC[$i]="$s"
+    [ -n "$o" ] && CRED_OPTS[$i]="$o"
   else
     CRED_ALIAS[${#CRED_ALIAS[@]}]="$a"
     CRED_VAL[${#CRED_VAL[@]}]="$v"
     CRED_SRC[${#CRED_SRC[@]}]="$s"
+    CRED_OPTS[${#CRED_OPTS[@]}]="$o"
   fi
 }
 
-cred_clear() { local i; i=$(cred_index "$1") && { CRED_VAL[$i]=""; CRED_SRC[$i]="removed"; }; }
+cred_clear() {
+  local i; i=$(cred_index "$1") && { CRED_VAL[$i]=""; CRED_SRC[$i]="removed"; CRED_OPTS[$i]=""; }
+}
 
 SKIPPED=""      # space-separated aliases
 NEW_LOCAL=""    # aliases needing a row in connections.local.conf
@@ -163,13 +172,14 @@ load_existing() {
     while [ "$i" -lt "$n" ]; do
       a="${REG_ALIAS[$i]}"
       if [ "${REG_KIND[$i]}" = mysql ] && dbq_mysql_group_exists "$a"; then
-        blk=$(awk -v g="[client-$a]" '$0==g{f=1;next} /^\[/{f=0} f' "$MYCNF")
+        blk=$(dbq_mysql_group_body "$a")
         h=$(printf '%s\n' "$blk" | awk -F'=' '/^host/{gsub(/[[:space:]]/,"",$2);print $2}')
         P=$(printf '%s\n' "$blk" | awk -F'=' '/^port/{gsub(/[[:space:]]/,"",$2);print $2}')
         u=$(printf '%s\n' "$blk" | awk -F'=' '/^user/{gsub(/[[:space:]]/,"",$2);print $2}')
         p=$(printf '%s\n' "$blk" | awk '/^password/{sub(/^password[[:space:]]*=[[:space:]]*/,"");print}')
         d=$(printf '%s\n' "$blk" | awk -F'=' '/^database/{gsub(/[[:space:]]/,"",$2);print $2}')
-        cred_set "$a" "${h}|${P:-3306}|${u}|${p}|${d}" "existing config"
+        # Carry forward any extra client options so regeneration cannot drop them.
+        cred_set "$a" "${h}|${P:-3306}|${u}|${p}|${d}" "existing config" "$(dbq_mysql_extra_options "$a")"
       fi
       i=$((i+1))
     done
@@ -257,7 +267,7 @@ EOF
 # ------------------------------------------------------------------ live test
 
 test_alias() {
-  local a="$1" kind secret h P u p d
+  local a="$1" kind secret h P u p d opts
   kind=$(reg_get kind "$a")
   secret=$(cred_get "$a" 2>/dev/null || true)
   if [ -z "$secret" ]; then
@@ -270,12 +280,54 @@ test_alias() {
     IFS='|' read -r h P u p d <<EOF
 $secret
 EOF
-    if dbq_ping_mysql_direct "$h" "${P:-3306}" "$u" "$p"; then
+    # Test with any extra options applied, so [a] can be verified before writing.
+    opts=$(cred_opts "$a" 2>/dev/null || true)
+    if dbq_ping_mysql_direct "$h" "${P:-3306}" "$u" "$p" "$opts"; then
       printf '%sok%s\n' "$C_GRN" "$C_RESET"; return 0
     fi
   fi
   printf '%sFAIL%s %s\n' "$C_RED" "$C_RESET" "$DBQ_PING_OUT"
+  # Nudge toward the fix when the server is asking for cleartext auth.
+  case "$DBQ_PING_OUT" in
+    *cleartext*) printf '  %spress [a] to enable cleartext auth over TLS for this alias%s\n' "$C_DIM" "$C_RESET" ;;
+  esac
   return 1
+}
+
+# Toggle extra MySQL client options. Currently one thing worth toggling:
+# cleartext auth for PAM/LDAP servers (ERROR 2059).
+prompt_mysql_options() {
+  local a="$1" cur yn
+  if [ "$(reg_get kind "$a")" != mysql ]; then
+    dbq_dim "  extra client options apply to MySQL aliases only"; return 1
+  fi
+  cur=$(cred_opts "$a" 2>/dev/null || true)
+  say ""
+  printf '  %sExtra MySQL client options%s\n' "$C_BOLD" "$C_RESET"
+  if printf '%s' "$cur" | grep -q 'enable-cleartext-plugin'; then
+    printf '  Cleartext auth is currently %sENABLED%s. Disable it? [y/N] ' "$C_GRN" "$C_RESET"
+    IFS= read -r yn
+    case "$yn" in
+      y|Y) cred_set_opts "$a" ""; dbq_dim "  disabled"; return 0 ;;
+      *) dbq_dim "  unchanged"; return 1 ;;
+    esac
+  fi
+  dbq_dim "  ERROR 2059 means the server authenticates via PAM/LDAP and needs the"
+  dbq_dim "  password sent using mysql_clear_password. The client blocks that by"
+  dbq_dim "  default because cleartext is unsafe without TLS."
+  say ""
+  printf '  Enable cleartext auth %swith ssl-mode=REQUIRED%s for "%s"? [y/N] ' "$C_BOLD" "$C_RESET" "$a"
+  IFS= read -r yn
+  case "$yn" in
+    y|Y)
+      # TLS is not optional here — cleartext without it sends the password in
+      # plain text over the wire.
+      cred_set_opts "$a" "enable-cleartext-plugin
+ssl-mode = REQUIRED"
+      printf '  %senabled%s (cleartext + TLS required)\n' "$C_GRN" "$C_RESET"
+      return 0 ;;
+    *) dbq_dim "  unchanged"; return 1 ;;
+  esac
 }
 
 # --------------------------------------------------------------------- prompts
@@ -354,6 +406,9 @@ EOF
     printf '       %s\n' "$shown"
     src=$(cred_src "$a" 2>/dev/null || true)
     [ -n "$src" ] && dbq_dim "       $src"
+    if printf '%s' "$(cred_opts "$a" 2>/dev/null || true)" | grep -q 'enable-cleartext-plugin'; then
+      dbq_dim "       cleartext auth enabled (TLS required)"
+    fi
   else
     printf '       %s(not set)%s\n' "$C_YEL" "$C_RESET"
   fi
@@ -363,19 +418,30 @@ walk_alias() {
   local a="$1" i="$2" n="$3" choice
   while :; do
     show_alias "$a" "$i" "$n"
-    printf '\n  %s[k]%s keep  %s[e]%s edit  %s[t]%s test  %s[s]%s skip  %s[r]%s remove  %s[?]%s help  > ' \
-      "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" \
-      "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET"
+    if [ "$(reg_get kind "$a")" = mysql ]; then
+      printf '\n  %s[k]%s keep  %s[e]%s edit  %s[t]%s test  %s[a]%s options  %s[s]%s skip  %s[r]%s remove  %s[?]%s help  > ' \
+        "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" \
+        "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET"
+    else
+      printf '\n  %s[k]%s keep  %s[e]%s edit  %s[t]%s test  %s[s]%s skip  %s[r]%s remove  %s[?]%s help  > ' \
+        "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" \
+        "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET"
+    fi
     IFS= read -r choice || choice=q
     case "${choice:-k}" in
       k|K|"")
+        # On a fresh machine every alias starts unset, and [k] is the natural
+        # "next" keypress. Treat keep-with-nothing-set as skip-for-now rather than
+        # re-prompting, which would trap the user in a loop with no way forward.
         if ! cred_has "$a"; then
-          dbq_dim "  nothing set — use [e] to enter a value, or [s] to skip it"
-          continue
+          mark_skipped "$a"
+          dbq_dim "  nothing set — skipping for now (run: dbq init --alias $a to add it later)"
+          return 0
         fi
         return 0 ;;
       e|E) edit_alias "$a" || true ;;
       t|T) test_alias "$a" || true ;;
+      a|A) prompt_mysql_options "$a" && test_alias "$a" || true ;;
       s|S) mark_skipped "$a"; cred_clear "$a"
            dbq_dim "  skipped — doctor will report this as deliberately unset"; return 0 ;;
       r|R) cred_clear "$a"; mark_skipped "$a"; dbq_dim "  removed"; return 0 ;;
@@ -386,6 +452,7 @@ walk_alias() {
   k  keep the current value and move on
   e  enter or replace the value (input hidden)
   t  test the current value against the live server
+  a  extra MySQL client options — enable cleartext auth (PAM/LDAP, ERROR 2059)
   s  skip — leave unset on purpose; doctor stops flagging it
   r  remove any stored value for this alias
   q  quit without writing anything
@@ -446,7 +513,7 @@ add_alias() {
 # ----------------------------------------------------------------- persistence
 
 write_all() {
-  local i n a kind secret h P u p d existing
+  local i n a kind secret h P u p d existing opts
 
   # mongo URIs
   {
@@ -481,6 +548,10 @@ EOF
         printf 'user = %s\n' "$u"
         printf 'password = %s\n' "$p"
         if [ -n "$d" ] && [ "$d" != "-" ]; then printf 'database = %s\n' "$d"; fi
+        # Extra client options (e.g. enable-cleartext-plugin + ssl-mode) last, so
+        # they survive regeneration.
+        opts=$(cred_opts "$a" 2>/dev/null || true)
+        [ -n "$opts" ] && printf '%s\n' "$opts"
         printf '\n'
       fi
       i=$((i+1))
