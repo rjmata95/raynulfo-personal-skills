@@ -183,9 +183,17 @@ Run it yourself:  dbq init
 ```
 
 This makes "secrets never touch the transcript" structural rather than conventional. An
-agent, background job, or subagent that attempts it is rejected. In Claude Code the agent
-instructs the user to type `! dbq init`, which runs it in-session — output lands in the
-conversation while typing stays local to the terminal.
+agent, background job, or subagent that attempts it is rejected.
+
+**Corrected after first real use:** the original design claimed a Claude Code user could run
+this in-session with the `!` prefix. That is wrong — `!` pipes stdin rather than allocating a
+TTY, so `dbq init` correctly refuses and the prompt loop cannot run. The agent must send the
+user to a separate terminal window (Terminal, iTerm, or an IDE terminal tab). The gate itself
+needed no change; only the instruction was wrong.
+
+This is a real cost of the design, accepted deliberately: setup cannot be driven entirely
+from within a Claude Code conversation. The alternative — letting an agent supply credentials
+on a TTY-less stdin — is exactly what the gate exists to prevent.
 
 ### `dbq init` modes
 
@@ -218,7 +226,7 @@ Per-alias screen, then one keypress:
 1. `dbq doctor` — establish what is missing.
 2. Install gaps (`brew install mongosh`). Agent-performed; nothing secret.
 3. Snapshot `mcp-rollback.json` **before any change**.
-4. Agent prints `! dbq init --from-mcp` and **stops**. It cannot proceed itself.
+4. Agent prints `dbq init --from-mcp` and **stops**. It cannot proceed itself.
 5. `dbq doctor` — verify aliases green.
 6. Seed `knowledge/<alias>/_schema.md` for green aliases.
 7. **Cutover.** Only aliases that answered a live query are eligible for MCP removal. Agent

@@ -24,15 +24,20 @@ dbq init requires an interactive terminal.
 Secrets must never pass through an agent transcript, so this command refuses to
 run when stdin is not a TTY (agents, subagents, background jobs, pipes, cron).
 
-Run it yourself in your terminal:
+Open a real terminal window — Terminal, iTerm, or your IDE's terminal tab — and
+run one of:
 
     dbq init --from-mcp     # migrating from existing DB MCP servers
     dbq init                # fresh setup
     dbq init --add          # add a new connection
+    dbq init --alias NAME   # fix a single connection
 
-In Claude Code, prefix with '!' to run it in-session:
+This will NOT work from inside a Claude Code session, including with the '!'
+prefix: that pipes stdin instead of attaching a terminal, so an interactive
+prompt loop cannot run. That is the point — the walkthrough is for your eyes
+only.
 
-    ! dbq init --from-mcp
+Nothing has been written. Re-run from a terminal when ready.
 EOF
   exit 2
 fi

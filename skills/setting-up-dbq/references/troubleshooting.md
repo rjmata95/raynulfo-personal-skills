@@ -39,13 +39,15 @@ a stock Mac. Check with:
 **`dbq init` exits with code 2 and a message about needing a terminal**
 
 Working as designed. `dbq init` refuses to run without a TTY so secrets never pass through an
-agent transcript. Run it yourself:
+agent transcript. Run it yourself, in a real terminal window:
 
 ```bash
 dbq init --from-mcp
 ```
 
-In Claude Code, `! dbq init --from-mcp` runs it in-session.
+**This will not work from inside a Claude Code session, including with the `!` prefix.** `!`
+pipes stdin rather than attaching a terminal, so the interactive prompt loop cannot run and
+you will get this same message. Use Terminal, iTerm, or your IDE's terminal tab.
 
 **`no credential for '<alias>'`** → `dbq init --alias <alias>`
 

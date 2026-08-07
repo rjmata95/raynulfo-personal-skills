@@ -27,7 +27,7 @@ Skipping rule 2 is how this decays into just another CLI.
 dbq --list                        # aliases, credential state, knowledge coverage
 ```
 
-If an alias shows `missing`, tell the user to run `! dbq init` — **do not try to configure
+If an alias shows `missing`, tell the user to run `dbq init` — **do not try to configure
 credentials yourself** (see "Never touch credentials" below).
 
 ## Querying
@@ -110,7 +110,7 @@ When credentials are missing or wrong, print the command and stop:
 
 > Run this in your terminal to set up the `patient` connection:
 > ```
-> ! dbq init --alias patient
+> dbq init --alias patient
 > ```
 
 Do not read `~/.config/dbq/env`, `~/.config/dbq/my.cnf`, or the `MDB_MCP_CONNECTION_STRING`
@@ -127,9 +127,9 @@ connectivity, and prints masked, actionable hints.
 |---|---|
 | `host not found — VPN connected?` | Off VPN. `.chenmed.local` and Atlas private-link need it. |
 | `timed out` | VPN or firewall. |
-| `authentication failed` | Stale credential → user runs `! dbq init --alias <name>`. |
+| `authentication failed` | Stale credential → user runs `dbq init --alias <name>`. |
 | `connected, but user lacks permission` | Read grant missing on that DB; not a dbq problem. |
-| `no credential for '<alias>'` | Never configured → `! dbq init`. |
+| `no credential for '<alias>'` | Never configured → `dbq init`. |
 | `mongosh is not installed` | `brew install mongosh`. |
 
 `dbq --dump-cmd <alias>` prints the underlying command (credentials **not** expanded) if you
@@ -140,7 +140,7 @@ need to hand the user something to run directly.
 Users can add their own databases and aliases — this is not limited to the shipped eight:
 
 ```
-! dbq init --add
+dbq init --add
 ```
 
 It prompts for alias, kind, environment, mode, and default database, then the credential,

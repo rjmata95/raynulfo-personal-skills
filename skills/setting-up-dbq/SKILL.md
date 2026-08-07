@@ -79,12 +79,12 @@ First confirm a rollback snapshot will exist. `dbq init --from-mcp` writes
 
 Then print exactly this and **wait for the user**:
 
-> Everything mechanical is done. Credentials are yours to enter — I'm not able to see them,
-> which is deliberate.
+> Everything mechanical is done. Credentials are yours to enter — I can't see them, which is
+> deliberate.
 >
-> Run this in your terminal:
+> **Open a real terminal window** (Terminal, iTerm, or your IDE's terminal tab) and run:
 > ```
-> ! dbq init --from-mcp
+> dbq init --from-mcp
 > ```
 > It reads your existing MongoDB/MySQL MCP settings, pre-fills every connection, and walks
 > you through them one at a time. Per alias: `[k]` keep, `[e]` edit, `[t]` test live,
@@ -92,14 +92,19 @@ Then print exactly this and **wait for the user**:
 >
 > Tell me when you're done and I'll verify.
 
+**This cannot run inside a Claude Code session — not even with the `!` prefix.** `!` pipes
+stdin rather than attaching a terminal, so `dbq init` correctly refuses with exit code 2 and
+an interactive prompt loop cannot run. Do not suggest `dbq init`; it wastes a round trip.
+Send the user to a separate terminal window.
+
 Choose the mode by situation:
 
-| Situation | Command |
+| Situation | Command (in a real terminal) |
 |---|---|
-| Has DB MCP servers to migrate from | `! dbq init --from-mcp` |
-| Fresh machine, no MCP servers | `! dbq init` |
-| One alias broken | `! dbq init --alias <name>` |
-| Adding their own database | `! dbq init --add` |
+| Has DB MCP servers to migrate from | `dbq init --from-mcp` |
+| Fresh machine, no MCP servers | `dbq init` |
+| One alias broken | `dbq init --alias <name>` |
+| Adding their own database | `dbq init --add` |
 
 **Do not proceed past this step on your own.** No credential means no verification, and no
 verification means the cutover in step 6 is unsafe.
@@ -114,7 +119,7 @@ Every alias the user configured should be `ok`. Interpret failures from `dbq_doc
 
 - `host not found` / `timed out` → ask whether they are on VPN, then re-run. Atlas
   private-link and `.chenmed.local` both require it.
-- `authentication failed` → `! dbq init --alias <name>`.
+- `authentication failed` → `dbq init --alias <name>`.
 - `connected, but user lacks permission` → a real grant issue; not fixable here. Suggest they
   skip that alias for now (`[s]`) and raise access separately.
 - `skipped` → deliberate. Not a problem; exclude it from the cutover.
@@ -189,14 +194,14 @@ Symlinks (not copies) keep the git repo authoritative — the same pattern as th
 
 Same seven steps, with two differences:
 
-- **Step 3** uses plain `! dbq init` (no MCP servers to harvest). Every alias starts unset;
+- **Step 3** uses plain `dbq init` (no MCP servers to harvest). Every alias starts unset;
   they `[e]`dit the ones they have access to and `[s]`kip the rest.
 - **Step 6** is a no-op if they never had DB MCP servers.
 
 They get your `knowledge/` directory for free. That is the payoff of keeping it in the repo:
 the gotchas travel with the skill.
 
-If they need a database nobody has registered yet, `! dbq init --add` writes it to their
+If they need a database nobody has registered yet, `dbq init --add` writes it to their
 local overlay. If it turns out to be broadly useful, add the row to
 `config/connections.conf` (no hostnames, no secrets) and commit.
 
