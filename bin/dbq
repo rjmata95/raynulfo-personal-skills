@@ -16,11 +16,21 @@ set -uo pipefail
 DBQ_VERSION="1.0.0"
 DBQ_PROG="dbq"
 
+# Resolve symlinks BEFORE sourcing the library: dbq is normally installed as a
+# symlink in ~/.local/bin, so dirname "$0" is the link's directory, not the repo.
+# This loop must be self-contained — it runs before any library function exists.
 _lib_self="${BASH_SOURCE[0]}"
+while [ -L "$_lib_self" ]; do
+  _lib_link=$(readlink "$_lib_self")
+  case "$_lib_link" in
+    /*) _lib_self="$_lib_link" ;;
+    *)  _lib_self="$(cd -P "$(dirname "$_lib_self")" && pwd)/$_lib_link" ;;
+  esac
+done
 _lib_dir="$(cd -P "$(dirname "$_lib_self")" && pwd)"
 # shellcheck source=_dbq-lib.sh
 . "$_lib_dir/_dbq-lib.sh"
-REPO_ROOT="$(_dbq_resolve_root "$_lib_self")"
+REPO_ROOT="$(cd -P "$_lib_dir/.." && pwd)"
 dbq_init_paths
 dbq_init_colors
 

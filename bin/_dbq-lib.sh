@@ -12,20 +12,10 @@
 # Sourced by: dbq, dbq-doctor, dbq-init. Single source of truth so the runner
 # and the diagnostics can never disagree about what an alias means.
 
-# ------------------------------------------------------------------ resolution
-
-# Follow symlinks to find the real repo root, however deep we are linked.
-_dbq_resolve_root() {
-  local self="$1" link
-  while [ -L "$self" ]; do
-    link=$(readlink "$self")
-    case "$link" in
-      /*) self="$link" ;;
-      *)  self="$(cd -P "$(dirname "$self")" && pwd)/$link" ;;
-    esac
-  done
-  (cd -P "$(dirname "$self")/.." && pwd)
-}
+# Note: symlink resolution deliberately lives inline in each entrypoint rather
+# than here. dbq is normally installed as a symlink in ~/.local/bin, so the repo
+# must be located BEFORE this file can be sourced — a function here would be
+# unavailable at that point.
 
 # ----------------------------------------------------------------------- paths
 

@@ -37,11 +37,19 @@ EOF
   exit 2
 fi
 
+# Resolve symlinks before sourcing — see the note in bin/dbq.
 _lib_self="${BASH_SOURCE[0]}"
+while [ -L "$_lib_self" ]; do
+  _lib_link=$(readlink "$_lib_self")
+  case "$_lib_link" in
+    /*) _lib_self="$_lib_link" ;;
+    *)  _lib_self="$(cd -P "$(dirname "$_lib_self")" && pwd)/$_lib_link" ;;
+  esac
+done
 _lib_dir="$(cd -P "$(dirname "$_lib_self")" && pwd)"
 # shellcheck source=_dbq-lib.sh
 . "$_lib_dir/_dbq-lib.sh"
-REPO_ROOT="$(_dbq_resolve_root "$_lib_self")"
+REPO_ROOT="$(cd -P "$_lib_dir/.." && pwd)"
 dbq_init_paths
 dbq_init_colors
 
