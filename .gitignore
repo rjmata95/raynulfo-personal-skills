@@ -1,0 +1,27 @@
+# Credentials and machine-local config never belong in this repo.
+# The real ones live in ~/.config/dbq/ (chmod 600). These patterns are a
+# backstop in case anything is ever copied into the working tree by mistake.
+env
+.env
+.env.*
+!.env.example
+my.cnf
+*.local.conf
+connections.local.conf
+mcp-rollback.json
+skipped
+*.pem
+*.key
+
+# Scratch — throwaway queries live in ~/.dbq/scratch, not here.
+scratch/
+*.tmp
+*.XXXXXX
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/

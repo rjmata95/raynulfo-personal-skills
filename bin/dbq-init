@@ -1,0 +1,546 @@
+#!/usr/bin/env bash
+# dbq init — interactive credential setup. HUMANS ONLY.
+#
+# This script refuses to run without a TTY on stdin. That is deliberate, and it is
+# the enforcement mechanism for a hard rule: credentials must never pass through an
+# agent transcript. An agent's job is to tell the user to run this, never to run it
+# itself. See skills/setting-up-dbq/SKILL.md.
+#
+#   dbq init              walk the registry, prompt for anything unset
+#   dbq init --from-mcp   pre-fill from existing DB MCP servers, then confirm
+#   dbq init --add        add a brand-new connection and alias
+#   dbq init --alias X    edit one alias only
+
+set -uo pipefail
+
+DBQ_PROG="dbq init"
+
+# ------------------------------------------------- TTY gate (load-bearing)
+
+if [ ! -t 0 ]; then
+  cat >&2 <<'EOF'
+dbq init requires an interactive terminal.
+
+Secrets must never pass through an agent transcript, so this command refuses to
+run when stdin is not a TTY (agents, subagents, background jobs, pipes, cron).
+
+Run it yourself in your terminal:
+
+    dbq init --from-mcp     # migrating from existing DB MCP servers
+    dbq init                # fresh setup
+    dbq init --add          # add a new connection
+
+In Claude Code, prefix with '!' to run it in-session:
+
+    ! dbq init --from-mcp
+EOF
+  exit 2
+fi
+
+_lib_self="${BASH_SOURCE[0]}"
+_lib_dir="$(cd -P "$(dirname "$_lib_self")" && pwd)"
+# shellcheck source=_dbq-lib.sh
+. "$_lib_dir/_dbq-lib.sh"
+REPO_ROOT="$(_dbq_resolve_root "$_lib_self")"
+dbq_init_paths
+dbq_init_colors
+
+MODE="walk"; ONLY_ALIAS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --from-mcp) MODE="from-mcp" ;;
+    --add)      MODE="add" ;;
+    --alias)    shift; ONLY_ALIAS="${1:-}"; [ -n "$ONLY_ALIAS" ] || dbq_die "--alias needs a name" ;;
+    -h|--help)
+      cat <<EOF
+dbq init — interactive credential setup (TTY only)
+
+  dbq init                walk the registry, prompt for anything unset
+  dbq init --from-mcp     pre-fill from existing DB MCP servers, then confirm
+  dbq init --add          add a brand-new connection and alias
+  dbq init --alias NAME   edit a single alias
+EOF
+      exit 0 ;;
+    *) dbq_die "unknown option '$1'" ;;
+  esac
+  shift
+done
+
+umask 077
+mkdir -p "$CFG_DIR" || dbq_die "cannot create $CFG_DIR"
+chmod 700 "$CFG_DIR" 2>/dev/null || true
+
+say() { printf '%s\n' "$*"; }
+
+# --------------------------------------------------------------- atomic writes
+
+# temp + chmod + mv, so an interrupt can never leave a half-written or
+# world-readable credential file behind.
+atomic_write() {
+  local dest="$1" tmp
+  tmp=$(mktemp "${dest}.XXXXXX") || dbq_die "cannot create temp file beside $dest"
+  cat >"$tmp" || { rm -f "$tmp"; dbq_die "write failed"; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; dbq_die "chmod failed"; }
+  mv -f "$tmp" "$dest" || { rm -f "$tmp"; dbq_die "atomic move failed"; }
+}
+
+# ------------------------------------------- credential store (bash 3.2 safe)
+
+# Parallel arrays indexed alongside the registry, since bash 3.2 has no
+# associative arrays. CRED_VAL holds the secret; CRED_SRC where it came from.
+CRED_ALIAS=(); CRED_VAL=(); CRED_SRC=()
+
+cred_index() {
+  local want="$1" i n="${#CRED_ALIAS[@]}"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    [ "${CRED_ALIAS[$i]}" = "$want" ] && { printf '%s' "$i"; return 0; }
+    i=$((i+1))
+  done
+  return 1
+}
+
+cred_get() { local i; i=$(cred_index "$1") || return 1; printf '%s' "${CRED_VAL[$i]}"; }
+cred_src() { local i; i=$(cred_index "$1") || return 1; printf '%s' "${CRED_SRC[$i]}"; }
+cred_has() { local v; v=$(cred_get "$1" 2>/dev/null) && [ -n "$v" ]; }
+
+cred_set() {
+  local a="$1" v="$2" s="$3" i
+  if i=$(cred_index "$a"); then
+    CRED_VAL[$i]="$v"; CRED_SRC[$i]="$s"
+  else
+    CRED_ALIAS[${#CRED_ALIAS[@]}]="$a"
+    CRED_VAL[${#CRED_VAL[@]}]="$v"
+    CRED_SRC[${#CRED_SRC[@]}]="$s"
+  fi
+}
+
+cred_clear() { local i; i=$(cred_index "$1") && { CRED_VAL[$i]=""; CRED_SRC[$i]="removed"; }; }
+
+SKIPPED=""      # space-separated aliases
+NEW_LOCAL=""    # aliases needing a row in connections.local.conf
+
+mark_skipped()   { case " $SKIPPED " in *" $1 "*) ;; *) SKIPPED="$SKIPPED $1" ;; esac; }
+unmark_skipped() { SKIPPED=$(printf '%s' "$SKIPPED" | tr ' ' '\n' | grep -vx "$1" | tr '\n' ' '); }
+mark_new_local() { case " $NEW_LOCAL " in *" $1 "*) ;; *) NEW_LOCAL="$NEW_LOCAL $1" ;; esac; }
+
+# ------------------------------------------------------------------- registry
+
+reg_load
+
+# --------------------------------------------------- existing credential state
+
+load_existing() {
+  local i n a kind key val line blk h P u p d
+  if [ -r "$ENV_FILE" ]; then
+    dbq_source_env || true
+    i=0; n=$(reg_count)
+    while [ "$i" -lt "$n" ]; do
+      a="${REG_ALIAS[$i]}"
+      if [ "${REG_KIND[$i]}" = mongo ]; then
+        key=$(dbq_env_key "$a")
+        eval "val=\${$key:-}"
+        [ -n "$val" ] && cred_set "$a" "$val" "existing config"
+      fi
+      i=$((i+1))
+    done
+  fi
+  if [ -r "$MYCNF" ]; then
+    i=0; n=$(reg_count)
+    while [ "$i" -lt "$n" ]; do
+      a="${REG_ALIAS[$i]}"
+      if [ "${REG_KIND[$i]}" = mysql ] && dbq_mysql_group_exists "$a"; then
+        blk=$(awk -v g="[client-$a]" '$0==g{f=1;next} /^\[/{f=0} f' "$MYCNF")
+        h=$(printf '%s\n' "$blk" | awk -F'=' '/^host/{gsub(/[[:space:]]/,"",$2);print $2}')
+        P=$(printf '%s\n' "$blk" | awk -F'=' '/^port/{gsub(/[[:space:]]/,"",$2);print $2}')
+        u=$(printf '%s\n' "$blk" | awk -F'=' '/^user/{gsub(/[[:space:]]/,"",$2);print $2}')
+        p=$(printf '%s\n' "$blk" | awk '/^password/{sub(/^password[[:space:]]*=[[:space:]]*/,"");print}')
+        d=$(printf '%s\n' "$blk" | awk -F'=' '/^database/{gsub(/[[:space:]]/,"",$2);print $2}')
+        cred_set "$a" "${h}|${P:-3306}|${u}|${p}|${d}" "existing config"
+      fi
+      i=$((i+1))
+    done
+  fi
+}
+
+# ------------------------------------------------------------- MCP harvesting
+
+harvest_mcp() {
+  [ -r "$CLAUDE_JSON" ] || { dbq_dim "No $(printf '%s' "${CLAUDE_JSON/#$HOME/~}") found — nothing to harvest."; return 0; }
+
+  local rows
+  rows=$(python3 - "$CLAUDE_JSON" <<'PY' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit
+out = []
+for name, cfg in (d.get("mcpServers") or {}).items():
+    env = cfg.get("env") or {}
+    uri = env.get("MDB_MCP_CONNECTION_STRING")
+    if uri:
+        out.append("\t".join(["mongo", name, uri]))
+    elif "MYSQL_HOST" in env:
+        out.append("\t".join([
+            "mysql", name,
+            "|".join([
+                env.get("MYSQL_HOST", ""), env.get("MYSQL_PORT", "3306"),
+                env.get("MYSQL_USER", ""), env.get("MYSQL_PASSWORD", ""),
+                env.get("MYSQL_DATABASE", ""),
+            ]),
+        ]))
+print("\n".join(out))
+PY
+)
+  if [ -z "$rows" ]; then dbq_dim "No DB MCP servers found to harvest."; return 0; fi
+
+  # Snapshot BEFORE anything changes, so rollback always exists.
+  if [ ! -r "$ROLLBACK" ]; then
+    if python3 - "$CLAUDE_JSON" >"$ROLLBACK.tmp" <<'PY' 2>/dev/null
+import json, sys
+d = json.load(open(sys.argv[1]))
+s = d.get("mcpServers") or {}
+keep = {n: c for n, c in s.items() if "mongo" in n.lower() or "mysql" in n.lower()}
+print(json.dumps({"mcpServers": keep}, indent=2))
+PY
+    then
+      if [ -s "$ROLLBACK.tmp" ]; then
+        chmod 600 "$ROLLBACK.tmp"; mv -f "$ROLLBACK.tmp" "$ROLLBACK"
+        dbq_dim "Saved MCP rollback snapshot → ${ROLLBACK/#$HOME/~}"
+      else
+        rm -f "$ROLLBACK.tmp"
+      fi
+    else
+      rm -f "$ROLLBACK.tmp"
+    fi
+  fi
+
+  local count=0 kind name payload alias cand
+  while IFS=$'\t' read -r kind name payload; do
+    [ -n "${kind:-}" ] || continue
+    # Map MCP server name onto a registry alias: exact match, then strip prefix.
+    alias=""
+    if reg_has "$name"; then
+      alias="$name"
+    else
+      cand="${name#mongodb-}"; cand="${cand#mysql-}"
+      if reg_has "$cand"; then alias="$cand"; fi
+    fi
+    if [ -z "$alias" ]; then
+      alias="$name"
+      dbq_dim "  MCP '$name' matches no shared alias — offering it as a new local alias"
+      reg_put "$alias" "$kind" "unknown" "ro" "-" "harvested from MCP '$name'"
+      mark_new_local "$alias"
+    fi
+    cred_set "$alias" "$payload" "harvested from MCP '$name'"
+    count=$((count+1))
+  done <<EOF
+$rows
+EOF
+  dbq_dim "Harvested $count connection(s) from MCP config."
+}
+
+# ------------------------------------------------------------------ live test
+
+test_alias() {
+  local a="$1" kind secret h P u p d
+  kind=$(reg_get kind "$a")
+  secret=$(cred_get "$a" 2>/dev/null || true)
+  if [ -z "$secret" ]; then
+    printf '  %sno value to test%s\n' "$C_YEL" "$C_RESET"; return 1
+  fi
+  printf '  testing… '
+  if [ "$kind" = mongo ]; then
+    if dbq_ping_mongo "$secret"; then printf '%sok%s\n' "$C_GRN" "$C_RESET"; return 0; fi
+  else
+    IFS='|' read -r h P u p d <<EOF
+$secret
+EOF
+    if dbq_ping_mysql_direct "$h" "${P:-3306}" "$u" "$p"; then
+      printf '%sok%s\n' "$C_GRN" "$C_RESET"; return 0
+    fi
+  fi
+  printf '%sFAIL%s %s\n' "$C_RED" "$C_RESET" "$DBQ_PING_OUT"
+  return 1
+}
+
+# --------------------------------------------------------------------- prompts
+
+prompt_mongo_uri() {
+  local a="$1" v
+  say ""
+  dbq_dim "  Paste the full mongodb+srv:// connection string (input hidden)."
+  dbq_dim "  Atlas private-link endpoints resolve non-standard ports via SRV —"
+  dbq_dim "  paste the SRV URI, not host:port."
+  printf '  URI: '
+  IFS= read -rs v; printf '\n'
+  if [ -z "$v" ]; then dbq_dim "  unchanged"; return 1; fi
+  case "$v" in
+    mongodb://*|mongodb+srv://*) ;;
+    *) printf '  %sMust start with mongodb:// or mongodb+srv://%s\n' "$C_RED" "$C_RESET"; return 1 ;;
+  esac
+  case "$v" in
+    *@*) ;;
+    *) printf '  %sNo credentials embedded in the URI — keeping it anyway.%s\n' "$C_YEL" "$C_RESET" ;;
+  esac
+  cred_set "$a" "$v" "entered just now"
+  unmark_skipped "$a"
+  printf '  %sset%s → %s\n' "$C_GRN" "$C_RESET" "$(dbq_mask_uri "$v")"
+  return 0
+}
+
+prompt_mysql() {
+  local a="$1" cur h P u p d ch cP cu cp cd
+  cur=$(cred_get "$a" 2>/dev/null || true)
+  IFS='|' read -r ch cP cu cp cd <<EOF
+${cur:-||||}
+EOF
+  say ""
+  printf '  Host [%s]: ' "${ch:-}"; IFS= read -r h; h="${h:-$ch}"
+  if [ -z "$h" ]; then printf '  %shost is required%s\n' "$C_RED" "$C_RESET"; return 1; fi
+  printf '  Port [%s]: ' "${cP:-3306}"; IFS= read -r P; P="${P:-${cP:-3306}}"
+  printf '  User [%s]: ' "${cu:-}"; IFS= read -r u; u="${u:-$cu}"
+  if [ -z "$u" ]; then printf '  %suser is required%s\n' "$C_RED" "$C_RESET"; return 1; fi
+  printf '  Password (hidden, blank keeps current): '; IFS= read -rs p; printf '\n'
+  p="${p:-$cp}"
+  local dflt="${cd:-$(reg_get ddb "$a")}"
+  [ "$dflt" = "-" ] && dflt=""
+  printf '  Default database [%s]: ' "$dflt"; IFS= read -r d; d="${d:-$dflt}"
+  cred_set "$a" "${h}|${P}|${u}|${p}|${d}" "entered just now"
+  unmark_skipped "$a"
+  printf '  %sset%s → %s@%s:%s/%s\n' "$C_GRN" "$C_RESET" "$u" "$h" "$P" "$d"
+  return 0
+}
+
+edit_alias() {
+  if [ "$(reg_get kind "$1")" = mongo ]; then prompt_mongo_uri "$1"; else prompt_mysql "$1"; fi
+}
+
+# ------------------------------------------------------------------ alias walk
+
+show_alias() {
+  local a="$1" i="$2" n="$3" kind mode_h secret shown h P u p d desc src
+  kind=$(reg_get kind "$a")
+  if [ "$(reg_get mode "$a")" = ro ]; then mode_h="read-only"; else mode_h="read-write"; fi
+  printf '\n%s[%s/%s]%s  %s%-18s%s %s · %s · %s\n' \
+    "$C_DIM" "$i" "$n" "$C_RESET" "$C_BOLD" "$a" "$C_RESET" "$kind" "$(reg_get env "$a")" "$mode_h"
+  desc=$(reg_get desc "$a")
+  [ -n "$desc" ] && dbq_dim "       $desc"
+
+  if cred_has "$a"; then
+    secret=$(cred_get "$a")
+    if [ "$kind" = mongo ]; then
+      shown=$(dbq_mask_uri "$secret")
+    else
+      IFS='|' read -r h P u p d <<EOF
+$secret
+EOF
+      shown="$u:****@$h:$P/$d"
+    fi
+    printf '       %s\n' "$shown"
+    src=$(cred_src "$a" 2>/dev/null || true)
+    [ -n "$src" ] && dbq_dim "       $src"
+  else
+    printf '       %s(not set)%s\n' "$C_YEL" "$C_RESET"
+  fi
+}
+
+walk_alias() {
+  local a="$1" i="$2" n="$3" choice
+  while :; do
+    show_alias "$a" "$i" "$n"
+    printf '\n  %s[k]%s keep  %s[e]%s edit  %s[t]%s test  %s[s]%s skip  %s[r]%s remove  %s[?]%s help  > ' \
+      "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" \
+      "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET" "$C_CYN" "$C_RESET"
+    IFS= read -r choice || choice=q
+    case "${choice:-k}" in
+      k|K|"")
+        if ! cred_has "$a"; then
+          dbq_dim "  nothing set — use [e] to enter a value, or [s] to skip it"
+          continue
+        fi
+        return 0 ;;
+      e|E) edit_alias "$a" || true ;;
+      t|T) test_alias "$a" || true ;;
+      s|S) mark_skipped "$a"; cred_clear "$a"
+           dbq_dim "  skipped — doctor will report this as deliberately unset"; return 0 ;;
+      r|R) cred_clear "$a"; mark_skipped "$a"; dbq_dim "  removed"; return 0 ;;
+      q|Q) say ""; dbq_dim "Stopping early — nothing written."; exit 0 ;;
+      '?'|h|H)
+        cat <<EOF
+
+  k  keep the current value and move on
+  e  enter or replace the value (input hidden)
+  t  test the current value against the live server
+  s  skip — leave unset on purpose; doctor stops flagging it
+  r  remove any stored value for this alias
+  q  quit without writing anything
+EOF
+        ;;
+      *) dbq_dim "  unrecognised — press k, e, t, s, r, ? or q" ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------- add an alias
+
+add_alias() {
+  local a kind env mode ddb desc yn
+  say ""
+  printf '%sAdd a new connection%s\n' "$C_BOLD" "$C_RESET"
+  while :; do
+    printf '  Alias (lowercase letters, digits, hyphens): '; IFS= read -r a
+    if [ -z "$a" ]; then dbq_dim "  cancelled"; return 1; fi
+    if ! printf '%s' "$a" | grep -qE '^[a-z0-9][a-z0-9-]*$'; then
+      printf '  %sonly lowercase letters, digits and hyphens%s\n' "$C_RED" "$C_RESET"; continue
+    fi
+    case "$a" in
+      doctor|init|scratch|help|list|version)
+        printf '  %s"%s" is a reserved dbq command%s\n' "$C_RED" "$a" "$C_RESET"; continue ;;
+    esac
+    if reg_has "$a"; then
+      printf '  %s"%s" already exists (%s, %s). Override it locally? [y/N] %s' \
+        "$C_YEL" "$a" "$(reg_get kind "$a")" "$(reg_get env "$a")" "$C_RESET"
+      IFS= read -r yn
+      case "$yn" in y|Y) ;; *) continue ;; esac
+    fi
+    break
+  done
+  while :; do
+    printf '  Kind [mongo/mysql]: '; IFS= read -r kind
+    case "$kind" in mongo|mysql) break ;; *) printf '  %senter mongo or mysql%s\n' "$C_RED" "$C_RESET" ;; esac
+  done
+  printf '  Environment [prod/nonprod/qa/local] (default nonprod): '; IFS= read -r env
+  env="${env:-nonprod}"
+  printf '  Mode [ro/rw] (default ro): '; IFS= read -r mode
+  case "$mode" in rw|RW) mode=rw ;; *) mode=ro ;; esac
+  printf '  Default database (blank for none): '; IFS= read -r ddb
+  ddb="${ddb:--}"
+  printf '  Description: '; IFS= read -r desc
+
+  reg_put "$a" "$kind" "$env" "$mode" "$ddb" "$desc"
+  mark_new_local "$a"
+
+  edit_alias "$a" || true
+  if cred_has "$a"; then
+    printf '\n  Test it now? [Y/n] '; IFS= read -r yn
+    case "$yn" in n|N) ;; *) test_alias "$a" || true ;; esac
+  fi
+  return 0
+}
+
+# ----------------------------------------------------------------- persistence
+
+write_all() {
+  local i n a kind secret h P u p d existing
+
+  # mongo URIs
+  {
+    printf '# dbq mongo connection strings — generated by `dbq init`\n'
+    printf '# chmod 600. Never commit. Never echo into a transcript.\n'
+    printf '# Edit interactively with: dbq init\n\n'
+    i=0; n=$(reg_count)
+    while [ "$i" -lt "$n" ]; do
+      a="${REG_ALIAS[$i]}"
+      if [ "${REG_KIND[$i]}" = mongo ] && cred_has "$a"; then
+        printf '%s="%s"\n' "$(dbq_env_key "$a")" "$(cred_get "$a")"
+      fi
+      i=$((i+1))
+    done
+  } | atomic_write "$ENV_FILE"
+
+  # mysql option groups — password lives here so it never enters argv
+  {
+    printf '# dbq MySQL option file — generated by `dbq init`\n'
+    printf '# chmod 600. dbq selects a group with --defaults-group-suffix=-<alias>\n\n'
+    i=0; n=$(reg_count)
+    while [ "$i" -lt "$n" ]; do
+      a="${REG_ALIAS[$i]}"
+      if [ "${REG_KIND[$i]}" = mysql ] && cred_has "$a"; then
+        secret=$(cred_get "$a")
+        IFS='|' read -r h P u p d <<EOF
+$secret
+EOF
+        printf '[client-%s]\n' "$a"
+        printf 'host = %s\n' "$h"
+        printf 'port = %s\n' "${P:-3306}"
+        printf 'user = %s\n' "$u"
+        printf 'password = %s\n' "$p"
+        if [ -n "$d" ] && [ "$d" != "-" ]; then printf 'database = %s\n' "$d"; fi
+        printf '\n'
+      fi
+      i=$((i+1))
+    done
+  } | atomic_write "$MYCNF"
+
+  # skipped list — so doctor says "skipped", not "MISSING", forever
+  if [ -n "$(printf '%s' "$SKIPPED" | tr -d ' ')" ]; then
+    printf '%s\n' $SKIPPED | grep . | sort -u | atomic_write "$SKIP_FILE"
+  fi
+
+  # personal registry overlay for aliases not in the shared file
+  if [ -n "$(printf '%s' "$NEW_LOCAL" | tr -d ' ')" ]; then
+    existing=""
+    [ -r "$LOCAL_CONF" ] && existing=$(grep -vE '^[[:space:]]*(#|$)' "$LOCAL_CONF" 2>/dev/null || true)
+    {
+      printf '# dbq personal connection registry — NOT tracked in git.\n'
+      printf '# Loaded after config/connections.conf and overrides it by alias.\n'
+      printf '# alias|kind|env|mode|default_db|description\n\n'
+      [ -n "$existing" ] && printf '%s\n' "$existing"
+      for a in $NEW_LOCAL; do
+        printf '%s' "$existing" | grep -qE "^$a\|" && continue
+        printf '%s|%s|%s|%s|%s|%s\n' "$a" "$(reg_get kind "$a")" "$(reg_get env "$a")" \
+          "$(reg_get mode "$a")" "$(reg_get ddb "$a")" "$(reg_get desc "$a")"
+      done
+    } >"$LOCAL_CONF.tmp"
+    chmod 644 "$LOCAL_CONF.tmp"; mv -f "$LOCAL_CONF.tmp" "$LOCAL_CONF"
+  fi
+}
+
+# ------------------------------------------------------------------------ main
+
+printf '%sdbq init%s — interactive credential setup\n' "$C_BOLD" "$C_RESET"
+dbq_dim "Config directory: ${CFG_DIR/#$HOME/~}"
+dbq_dim "Input is hidden as you type; values are never printed unmasked."
+
+load_existing
+if [ "$MODE" = "from-mcp" ]; then
+  say ""
+  printf '%sHarvesting existing MCP configuration…%s\n' "$C_BOLD" "$C_RESET"
+  harvest_mcp
+fi
+
+if [ "$MODE" = "add" ]; then
+  add_alias || exit 0
+else
+  TARGETS=""
+  if [ -n "$ONLY_ALIAS" ]; then
+    reg_has "$ONLY_ALIAS" || dbq_die "unknown alias '$ONLY_ALIAS'"
+    TARGETS="$ONLY_ALIAS"
+  else
+    i=0; n=$(reg_count)
+    while [ "$i" -lt "$n" ]; do TARGETS="$TARGETS ${REG_ALIAS[$i]}"; i=$((i+1)); done
+  fi
+  tcount=$(printf '%s\n' $TARGETS | grep -c . || true)
+  say ""
+  dbq_dim "$tcount alias(es) to review. Use [s] to skip anything you don't have access to."
+  i=0
+  for a in $TARGETS; do
+    i=$((i+1)); walk_alias "$a" "$i" "$tcount"
+  done
+fi
+
+write_all
+
+say ""
+printf '%sWritten:%s\n' "$C_BOLD" "$C_RESET"
+for f in "$ENV_FILE" "$MYCNF"; do
+  [ -r "$f" ] && printf '  %-44s %s(%s)%s\n' "${f/#$HOME/~}" "$C_DIM" "$(dbq_perms_of "$f")" "$C_RESET"
+done
+[ -r "$SKIP_FILE" ]  && printf '  %-44s %s(%s skipped)%s\n' "${SKIP_FILE/#$HOME/~}" "$C_DIM" "$(grep -c . "$SKIP_FILE" 2>/dev/null || echo 0)" "$C_RESET"
+[ -r "$LOCAL_CONF" ] && printf '  %-44s %s(personal aliases)%s\n' "${LOCAL_CONF/#$HOME/~}" "$C_DIM" "$C_RESET"
+
+say ""
+printf 'Next:  %sdbq doctor%s     verify every alias against live servers\n' "$C_CYN" "$C_RESET"
+printf '       %sdbq --list%s     see what is configured\n' "$C_CYN" "$C_RESET"

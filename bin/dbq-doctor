@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# dbq doctor — read-only diagnosis of a dbq installation.
+#
+# AGENT-SAFE. Prompts for nothing, writes nothing, prints no secrets. Every value
+# that could contain a credential is masked before display.
+#
+# Exit codes:  0 = all good   1 = problems found   2 = invocation error
+
+set -uo pipefail
+
+DBQ_PROG="dbq doctor"
+
+_lib_self="${BASH_SOURCE[0]}"
+_lib_dir="$(cd -P "$(dirname "$_lib_self")" && pwd)"
+# shellcheck source=_dbq-lib.sh
+. "$_lib_dir/_dbq-lib.sh"
+REPO_ROOT="$(_dbq_resolve_root "$_lib_self")"
+dbq_init_paths
+dbq_init_colors
+
+DO_CONNECT=1
+TOOLS_ONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-connect) DO_CONNECT=0 ;;
+    --tools-only) TOOLS_ONLY=1 ;;
+    -h|--help)
+      cat <<EOF
+dbq doctor — read-only diagnosis. Safe for agents to run.
+
+  --no-connect   skip live connectivity tests (fast, works offline)
+  --tools-only   check installed tooling only
+EOF
+      exit 0 ;;
+    *) printf 'dbq doctor: unknown option %s\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+PROBLEMS=0
+NEXT_STEPS=""
+VERIFIED=""
+UNVERIFIED=""
+
+add_step() { NEXT_STEPS="$NEXT_STEPS$1
+"; }
+
+ok()   { printf '  %-36s %sok%s %s\n'      "$1" "$C_GRN" "$C_RESET" "${2:-}"; }
+bad()  { printf '  %-36s %sFAIL%s %s\n'    "$1" "$C_RED" "$C_RESET" "${2:-}"; PROBLEMS=$((PROBLEMS+1)); }
+miss() { printf '  %-36s %sMISSING%s %s\n' "$1" "$C_YEL" "$C_RESET" "${2:-}"; PROBLEMS=$((PROBLEMS+1)); }
+skip() { printf '  %-36s %sskipped%s %s\n' "$1" "$C_DIM" "$C_RESET" "${2:-}"; }
+note() { printf '  %-36s %s%s%s\n'         "$1" "$C_DIM" "${2:-}" "$C_RESET"; }
+head_(){ printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"; }
+
+tilde() { printf '%s' "${1/#$HOME/~}"; }
+
+# ---------------------------------------------------------------------- tools
+
+head_ "TOOLS"
+for t in mongosh mysql; do
+  if command -v "$t" >/dev/null 2>&1; then
+    ok "$t" "$C_DIM$("$t" --version 2>&1 | head -1 | tr -d '\n' | cut -c1-38)$C_RESET"
+  else
+    if [ "$t" = mysql ]; then pkg="mysql-client"; else pkg="mongosh"; fi
+    miss "$t" "install: brew install $pkg"
+    add_step "brew install $pkg"
+  fi
+done
+if command -v claude >/dev/null 2>&1; then
+  ok "claude CLI"
+else
+  note "claude CLI" "not found — MCP cutover would have to be manual"
+fi
+
+if [ "$TOOLS_ONLY" -eq 1 ]; then
+  printf '\n'
+  if [ "$PROBLEMS" -gt 0 ]; then exit 1; fi
+  exit 0
+fi
+
+# --------------------------------------------------------------------- config
+
+head_ "CONFIG"
+if [ -d "$CFG_DIR" ]; then
+  ok "$(tilde "$CFG_DIR")"
+else
+  miss "$(tilde "$CFG_DIR")" "created by: dbq init"
+  add_step "dbq init --from-mcp"
+fi
+
+for f in "$ENV_FILE" "$MYCNF"; do
+  label=$(tilde "$f")
+  if [ -r "$f" ]; then
+    p=$(dbq_perms_of "$f")
+    if [ "$p" = "600" ]; then
+      ok "$label" "$C_DIM(600)$C_RESET"
+    else
+      bad "$label" "permissions are $p, must be 600"
+      add_step "chmod 600 $f"
+    fi
+  else
+    miss "$label" "created by: dbq init"
+  fi
+done
+
+if [ -r "$LOCAL_CONF" ]; then
+  ncustom=$(grep -cvE '^[[:space:]]*(#|$)' "$LOCAL_CONF" 2>/dev/null || echo 0)
+  ok "$(tilde "$LOCAL_CONF")" "$C_DIM($ncustom personal alias(es))$C_RESET"
+else
+  note "$(tilde "$LOCAL_CONF")" "none (optional — add via: dbq init --add)"
+fi
+
+if [ -r "$ROLLBACK" ]; then
+  ok "$(tilde "$ROLLBACK")" "$C_DIM(MCP rollback available)$C_RESET"
+else
+  note "$(tilde "$ROLLBACK")" "no snapshot yet — taken before MCP removal"
+fi
+
+# ------------------------------------------------------------------- registry
+
+head_ "REGISTRY"
+if [ -r "$SHARED_CONF" ]; then
+  nshared=$(grep -cvE '^[[:space:]]*(#|$)' "$SHARED_CONF" 2>/dev/null || echo 0)
+  ok "config/connections.conf" "$C_DIM($nshared shared alias(es))$C_RESET"
+else
+  bad "config/connections.conf" "shared registry missing from repo"
+fi
+
+# Same loader the runner uses, so doctor can never disagree with dbq itself.
+reg_load
+
+# ---------------------------------------------------------------- connections
+
+head_ "CONNECTIONS"
+i=0; n=$(reg_count)
+while [ "$i" -lt "$n" ]; do
+  a="${REG_ALIAS[$i]}"; kind="${REG_KIND[$i]}"
+  label=$(printf '%-20s %-5s %-7s %s' "$a" "$kind" "${REG_ENV[$i]}" "${REG_MODE[$i]}")
+
+  if dbq_is_skipped "$a"; then
+    skip "$label" "deliberately unset"
+    i=$((i+1)); continue
+  fi
+
+  if ! dbq_has_credential "$a" "$kind"; then
+    miss "$label" "no credential — run: dbq init"
+    UNVERIFIED="$UNVERIFIED$a,"
+    i=$((i+1)); continue
+  fi
+
+  if [ "$DO_CONNECT" -eq 0 ]; then
+    note "$label" "credential present (connectivity not tested)"
+    UNVERIFIED="$UNVERIFIED$a,"
+    i=$((i+1)); continue
+  fi
+
+  start=$(date +%s)
+  if [ "$kind" = mongo ]; then
+    uri=$(dbq_mongo_uri "$a")
+    if dbq_ping_mongo "$uri"; then rc=0; else rc=1; fi
+  else
+    if dbq_ping_mysql_group "$a"; then rc=0; else rc=1; fi
+  fi
+  elapsed=$(( $(date +%s) - start ))
+
+  if [ "$rc" -eq 0 ]; then
+    ok "$label" "$C_DIM${elapsed}s$C_RESET"
+    VERIFIED="$VERIFIED$a,"
+  else
+    bad "$label" "$DBQ_PING_OUT"
+    UNVERIFIED="$UNVERIFIED$a,"
+  fi
+  i=$((i+1))
+done
+
+# ------------------------------------------------------------------ MCP state
+
+head_ "MCP"
+if [ -r "$CLAUDE_JSON" ]; then
+  db_servers=$(python3 - "$CLAUDE_JSON" <<'PY' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit
+s = d.get("mcpServers") or {}
+print("\n".join(n for n in s if "mongo" in n.lower() or "mysql" in n.lower()))
+PY
+)
+  if [ -n "$db_servers" ]; then
+    cnt=$(printf '%s\n' "$db_servers" | grep -c . || true)
+    printf '  %-36s %s%s DB server(s) still present%s\n' "$(tilde "$CLAUDE_JSON")" "$C_YEL" "$cnt" "$C_RESET"
+    printf '%s\n' "$db_servers" | sed "s/^/      $C_DIM/;s/\$/$C_RESET/"
+    printf '      %smigration pending — see the setting-up-dbq skill%s\n' "$C_DIM" "$C_RESET"
+  else
+    ok "$(tilde "$CLAUDE_JSON")" "$C_DIM no DB MCP servers — migration complete$C_RESET"
+  fi
+else
+  note "$(tilde "$CLAUDE_JSON")" "not found"
+fi
+
+# ------------------------------------------------------------------ knowledge
+
+head_ "KNOWLEDGE"
+seeded=0; unseeded=""
+i=0
+while [ "$i" -lt "$n" ]; do
+  a="${REG_ALIAS[$i]}"
+  if [ -f "$KNOWLEDGE_DIR/$a/_schema.md" ]; then
+    seeded=$((seeded+1))
+  else
+    unseeded="$unseeded$a "
+  fi
+  i=$((i+1))
+done
+printf '  %-36s %s%s/%s alias(es) documented%s\n' "knowledge/" "$C_DIM" "$seeded" "$n" "$C_RESET"
+for a in $unseeded; do
+  printf '      %sknowledge/%s/ unseeded%s\n' "$C_DIM" "$a" "$C_RESET"
+done
+
+# -------------------------------------------------------------------- summary
+
+head_ "SUMMARY"
+if [ "$PROBLEMS" -eq 0 ]; then
+  printf '  %sAll checks passed.%s\n' "$C_GRN" "$C_RESET"
+  vcount=$(printf '%s' "$VERIFIED" | tr ',' '\n' | grep -c . || true)
+  [ "$vcount" -gt 0 ] && printf '  %s%s alias(es) verified against live servers.%s\n' \
+    "$C_DIM" "$vcount" "$C_RESET"
+else
+  printf '  %s%s problem(s) found.%s\n' "$C_YEL" "$PROBLEMS" "$C_RESET"
+  if [ -n "$NEXT_STEPS" ]; then
+    printf '\n  %sSuggested next step(s):%s\n' "$C_BOLD" "$C_RESET"
+    printf '%s' "$NEXT_STEPS" | awk 'NF && !seen[$0]++ { print "    " $0 }'
+  fi
+fi
+
+# Machine-readable tail so the setup skill can gate the MCP cutover on real
+# results rather than on an agent's impression of the output above.
+printf '\n%sMACHINE-READABLE%s\n' "$C_DIM" "$C_RESET"
+printf 'dbq_doctor_problems=%s\n' "$PROBLEMS"
+printf 'dbq_doctor_verified=%s\n' "${VERIFIED%,}"
+printf 'dbq_doctor_unverified=%s\n' "${UNVERIFIED%,}"
+
+if [ "$PROBLEMS" -gt 0 ]; then exit 1; fi
+exit 0

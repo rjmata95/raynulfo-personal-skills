@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# dbq — one CLI for every database, replacing per-database MCP servers.
+#
+# Design invariants for anyone editing this:
+#   * Credentials NEVER enter argv. Mongo URIs pass through the environment;
+#     MySQL passwords through an option file. Keeps them out of `ps`, shell
+#     history, and agent transcripts.
+#   * `doctor` is read-only and agent-safe. `init` is TTY-only and human-only.
+#   * Everything is idempotent. Re-running any command is always safe.
+#   * bash 3.2 compatible (macOS system bash). See bin/_dbq-lib.sh.
+#
+# Usage guidance lives in skills/querying-databases/SKILL.md.
+
+set -uo pipefail
+
+DBQ_VERSION="1.0.0"
+DBQ_PROG="dbq"
+
+_lib_self="${BASH_SOURCE[0]}"
+_lib_dir="$(cd -P "$(dirname "$_lib_self")" && pwd)"
+# shellcheck source=_dbq-lib.sh
+. "$_lib_dir/_dbq-lib.sh"
+REPO_ROOT="$(_dbq_resolve_root "$_lib_self")"
+dbq_init_paths
+dbq_init_colors
+
+# --------------------------------------------------------- read-only guarding
+
+MONGO_WRITE_RE='\.(insert|insertOne|insertMany|update|updateOne|updateMany|replaceOne|delete|deleteOne|deleteMany|remove|drop|dropDatabase|dropIndex|dropIndexes|createIndex|createCollection|renameCollection|findAndModify|findOneAndUpdate|findOneAndDelete|findOneAndReplace|bulkWrite|save)[[:space:]]*\('
+SQL_WRITE_RE='(^|[[:space:];(])(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|REPLACE|GRANT|REVOKE|RENAME|LOAD[[:space:]]+DATA|SET[[:space:]]+GLOBAL)([[:space:];(]|$)'
+
+# Moves the data-fix-scripts rule ("MongoDB and MySQL are read-only query
+# sources") from the honour system to the tool boundary.
+assert_read_only() {
+  local alias="$1" kind="$2" mode="$3" query="$4" re
+  case "$kind" in
+    mongo) re="$MONGO_WRITE_RE" ;;
+    mysql) re="$SQL_WRITE_RE" ;;
+    *) return 0 ;;
+  esac
+  printf '%s' "$query" | grep -qiE "$re" || return 0
+
+  if [ "$mode" = "ro" ]; then
+    dbq_die "'$alias' is read-only; refusing a mutating query.
+  Direct DB writes are prohibited — mutations go through GraphQL.
+  See the data-fix-scripts skill for the correct path."
+  fi
+  if [ "${DBQ_ALLOW_WRITE:-0}" != "1" ]; then
+    dbq_die "'$alias' is rw, but this looks like a mutation.
+  Writes should still go through GraphQL — see the data-fix-scripts skill.
+  To override deliberately: DBQ_ALLOW_WRITE=1 dbq $alias '...'"
+  fi
+}
+
+# Logs the QUERY only. The connection string is deliberately never written here.
+log_query() {
+  local alias="$1" query="$2" dir
+  dir=$(dbq_scratch_today)
+  {
+    printf '[%s] alias=%s\n' "$(date +%FT%T)" "$alias"
+    printf '%s\n---\n' "$query"
+  } >>"$dir/queries.log" 2>/dev/null || true
+}
+
+# --------------------------------------------------------------- query runner
+
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || dbq_die "$1 is not installed. Run: dbq doctor"
+}
+
+run_mongo() {
+  local alias="$1" ddb="$2" query="$3" uri prelude
+  require_tool mongosh
+  uri=$(dbq_mongo_uri "$alias") || dbq_die "no credential for '$alias'. Run: dbq init"
+
+  # The URI is exported, not passed as an argument — keeps it out of ps/argv.
+  # Atlas private-link endpoints use non-standard ports (observed 1037-1045)
+  # resolved via SRV, so always hand mongosh the SRV URI, never host:port.
+  prelude='db = connect(process.env.__DBQ_URI);'
+  if [ "$ddb" != "-" ] && [ -n "$ddb" ]; then
+    prelude="db = connect(process.env.__DBQ_URI); db = db.getSiblingDB('$ddb');"
+  fi
+
+  __DBQ_URI="$uri" mongosh --nodb --quiet --json=relaxed \
+    --eval "$prelude" --eval "$query"
+}
+
+run_mysql() {
+  local alias="$1" ddb="$2" query="$3"
+  require_tool mysql
+  dbq_mysql_group_exists "$alias" \
+    || dbq_die "no credential group for '$alias'. Run: dbq init"
+
+  # --defaults-file + group suffix keeps the password out of argv entirely.
+  set -- --defaults-file="$MYCNF" --defaults-group-suffix="-$alias" \
+         --batch --raw --column-names
+  if [ "$ddb" != "-" ] && [ -n "$ddb" ]; then set -- "$@" "$ddb"; fi
+  mysql "$@" -e "$query"
+}
+
+dispatch_query() {
+  local alias="$1" query="$2" idx kind ddb mode
+  idx=$(reg_index "$alias") || dbq_die "unknown alias '$alias'. See: dbq --list"
+  kind="${REG_KIND[$idx]}"; ddb="${REG_DDB[$idx]}"; mode="${REG_MODE[$idx]}"
+  [ -n "${DBQ_DB:-}" ] && ddb="$DBQ_DB"
+
+  assert_read_only "$alias" "$kind" "$mode" "$query"
+  dbq_prune_scratch
+  log_query "$alias" "$query"
+
+  case "$kind" in
+    mongo) run_mongo "$alias" "$ddb" "$query" ;;
+    mysql) run_mysql "$alias" "$ddb" "$query" ;;
+  esac
+}
+
+# ------------------------------------------------------------------ inspection
+
+cmd_list() {
+  reg_load
+  printf '%s%-20s %-6s %-8s %-5s %-12s %s%s\n' "$C_BOLD" \
+    ALIAS KIND ENV MODE CREDENTIAL KNOWLEDGE "$C_RESET"
+  local i n alias kind cred know
+  i=0; n=$(reg_count)
+  while [ "$i" -lt "$n" ]; do
+    alias="${REG_ALIAS[$i]}"; kind="${REG_KIND[$i]}"
+    if dbq_has_credential "$alias" "$kind"; then cred="configured"
+    elif dbq_is_skipped "$alias";           then cred="skipped"
+    else                                         cred="missing"; fi
+    if [ -d "$KNOWLEDGE_DIR/$alias" ]; then know="yes"; else know="none"; fi
+    printf '%-20s %-6s %-8s %-5s %-12s %s\n' \
+      "$alias" "$kind" "${REG_ENV[$i]}" "${REG_MODE[$i]}" "$cred" "$know"
+    i=$((i+1))
+  done
+  printf '\n%sQuery:%s dbq <alias> '"'"'<query>'"'"'    %sSetup:%s dbq doctor / dbq init\n' \
+    "$C_DIM" "$C_RESET" "$C_DIM" "$C_RESET"
+}
+
+cmd_dump_cmd() {
+  local alias="${1:-}" idx kind
+  [ -n "$alias" ] || dbq_die "usage: dbq --dump-cmd <alias>"
+  reg_load
+  idx=$(reg_index "$alias") || dbq_die "unknown alias '$alias'"
+  kind="${REG_KIND[$idx]}"
+  printf '# Escape hatch for %s (%s). Credentials are NOT expanded below.\n' "$alias" "$kind"
+  case "$kind" in
+    mongo)
+      printf '%s\n' "set -a; . $ENV_FILE; set +a"
+      printf '%s\n' "__DBQ_URI=\"\$$(dbq_env_key "$alias")\" mongosh --nodb --quiet --json=relaxed \\"
+      printf '%s\n' "  --eval 'db = connect(process.env.__DBQ_URI);' \\"
+      printf '%s\n' "  --eval 'db.getCollectionNames()'"
+      ;;
+    mysql)
+      printf '%s\n' "mysql --defaults-file=$MYCNF --defaults-group-suffix=-$alias \\"
+      printf '%s\n' "  --batch --raw --column-names ${REG_DDB[$idx]} -e 'SELECT 1'"
+      ;;
+  esac
+}
+
+cmd_collections() {
+  local alias="${1:-}" idx kind
+  [ -n "$alias" ] || dbq_die "usage: dbq --collections <alias>"
+  reg_load
+  idx=$(reg_index "$alias") || dbq_die "unknown alias '$alias'"
+  kind="${REG_KIND[$idx]}"
+  case "$kind" in
+    mongo) dispatch_query "$alias" 'db.getCollectionNames().forEach(function (c) { print(c); })' ;;
+    mysql) dispatch_query "$alias" 'SHOW TABLES' ;;
+  esac
+}
+
+# Derives a field/type map by sampling. Replaces the collection-schema MCP tool;
+# DB-side sibling of data-fix-scripts/introspect-schema.js (which covers GraphQL).
+cmd_schema() {
+  local target="${1:-}" n="${2:-200}" alias coll idx kind
+  [ -n "$target" ] || dbq_die "usage: dbq --schema <alias>.<collection> [sample]"
+  case "$target" in
+    *.*) alias="${target%%.*}"; coll="${target#*.}" ;;
+    *) dbq_die "expected <alias>.<collection>, got '$target'" ;;
+  esac
+  reg_load
+  idx=$(reg_index "$alias") || dbq_die "unknown alias '$alias'"
+  kind="${REG_KIND[$idx]}"
+
+  case "$kind" in
+    mysql)
+      dispatch_query "$alias" "DESCRIBE \`$coll\`"
+      printf '\n-- indexes --\n'
+      dispatch_query "$alias" "SHOW INDEX FROM \`$coll\`"
+      ;;
+    mongo)
+      dispatch_query "$alias" "
+(function () {
+  var shape = {};
+  function typeOf(v) {
+    if (v === null) return 'null';
+    if (Array.isArray(v)) return 'array';
+    if (v instanceof Date) return 'date';
+    if (v && v._bsontype) return v._bsontype;
+    return typeof v;
+  }
+  function walk(o, prefix, depth) {
+    if (depth > 4) return;
+    Object.keys(o).forEach(function (k) {
+      var path = prefix ? prefix + '.' + k : k;
+      var v = o[k], t = typeOf(v);
+      if (!shape[path]) shape[path] = { types: {}, count: 0 };
+      shape[path].types[t] = (shape[path].types[t] || 0) + 1;
+      shape[path].count++;
+      if (t === 'object' && v) walk(v, path, depth + 1);
+      if (t === 'array' && v.length && typeOf(v[0]) === 'object')
+        walk(v[0], path + '[]', depth + 1);
+    });
+  }
+  var docs = db.getCollection('$coll').find({}).limit($n).toArray();
+  docs.forEach(function (d) { walk(d, '', 0); });
+  function pad(s, w) { s = String(s); while (s.length < w) s += ' '; return s; }
+  print('collection: $coll');
+  print('sampled:    ' + docs.length + ' document(s)');
+  print('');
+  print(pad('field', 56) + pad('presence', 11) + 'types');
+  Object.keys(shape).sort().forEach(function (p) {
+    var s = shape[p];
+    var pct = Math.round((s.count / Math.max(docs.length, 1)) * 100) + '%';
+    print(pad(p, 56) + pad(pct, 11) + Object.keys(s.types).join(', '));
+  });
+  print('');
+  print('indexes:');
+  db.getCollection('$coll').getIndexes().forEach(function (i) {
+    print('  ' + i.name + '  ' + JSON.stringify(i.key));
+  });
+})()"
+      ;;
+  esac
+}
+
+cmd_file() {
+  local alias="${1:-}" path="${2:-}"
+  [ -n "$alias" ] && [ -n "$path" ] || dbq_die "usage: dbq --file <alias> <path>"
+  [ -r "$path" ] || dbq_die "cannot read $path"
+  reg_load
+  dispatch_query "$alias" "$(cat "$path")"
+}
+
+cmd_scratch() {
+  dbq_prune_scratch
+  local dir; dir=$(dbq_scratch_today)
+  printf '%s\n' "$dir"
+  if [ "${1:-}" = "--list" ] && [ -d "$SCRATCH_ROOT" ]; then
+    printf '\n%sretained (%s-day window):%s\n' "$C_DIM" "$RETENTION_DAYS" "$C_RESET"
+    ls -1 "$SCRATCH_ROOT" 2>/dev/null | sed 's/^/  /'
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------- usage
+
+cmd_help() {
+  cat <<EOF
+${C_BOLD}dbq${C_RESET} $DBQ_VERSION — one CLI for every database
+
+${C_BOLD}QUERY${C_RESET}
+  dbq <alias> '<query>'            run a query using real mongosh / mysql syntax
+  dbq --file <alias> <path>        run a saved script file
+  DBQ_DB=<db> dbq <alias> '...'    override the default database
+
+${C_BOLD}INSPECT${C_RESET}
+  dbq --list                       aliases, credential state, knowledge coverage
+  dbq --collections <alias>        list collections / tables
+  dbq --schema <alias>.<coll> [n]  derive field/type map + indexes (default n=200)
+  dbq --dump-cmd <alias>           print the raw command to run yourself
+
+${C_BOLD}SETUP${C_RESET}
+  dbq doctor                       diagnose tools, credentials, connectivity
+  dbq init [--from-mcp]            interactive credential setup     ${C_DIM}(TTY only)${C_RESET}
+  dbq init --add                   add a new connection + alias     ${C_DIM}(TTY only)${C_RESET}
+  dbq scratch [--list]             print today's scratch directory
+
+${C_BOLD}EXAMPLES${C_RESET}
+  dbq medication 'db.patientPrescription.countDocuments({tenantId:"..."})'
+  dbq mysql-prod 'SELECT office_id, name FROM office LIMIT 5'
+  dbq --schema patient.patient 500
+
+Read-only aliases reject mutating queries; writes go through GraphQL (see the
+data-fix-scripts skill). Scratch files are kept $RETENTION_DAYS days.
+EOF
+}
+
+# ------------------------------------------------------------------- dispatch
+
+main() {
+  [ $# -eq 0 ] && { cmd_help; exit 0; }
+
+  # Prune on every real invocation, not just query paths — otherwise a week of
+  # read-only `--list` / `--schema` calls would let stale scratch dirs survive
+  # past the retention window. Cheap: one `find` over a shallow directory.
+  dbq_prune_scratch
+
+  case "$1" in
+    -h|--help|help)  cmd_help ;;
+    --version)       printf 'dbq %s\n' "$DBQ_VERSION" ;;
+    --list|-l)       cmd_list ;;
+    --dump-cmd)      shift; cmd_dump_cmd "${1:-}" ;;
+    --collections)   shift; cmd_collections "${1:-}" ;;
+    --schema)        shift; cmd_schema "${1:-}" "${2:-200}" ;;
+    --file)          shift; cmd_file "${1:-}" "${2:-}" ;;
+    scratch)         shift; cmd_scratch "${1:-}" ;;
+    doctor)          shift; exec "$REPO_ROOT/bin/dbq-doctor" "$@" ;;
+    init)            shift; exec "$REPO_ROOT/bin/dbq-init" "$@" ;;
+    -*)              dbq_die "unknown option '$1'. See: dbq --help" ;;
+    *)
+      alias="$1"; shift
+      [ $# -ge 1 ] || dbq_die "no query given.
+  Usage: dbq $alias '<query>'
+  Try:   dbq --schema $alias.<collection>"
+      reg_load
+      dispatch_query "$alias" "$*"
+      ;;
+  esac
+}
+
+main "$@"
