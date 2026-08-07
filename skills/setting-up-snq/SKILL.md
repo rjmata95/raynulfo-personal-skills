@@ -53,10 +53,24 @@ already fine.
 
 Only what TOOLS reports missing. All safe, non-secret — do these yourself.
 
+**Check `doctor` before installing anything.** Playwright is frequently already present but
+*nested* under `@playwright/cli/node_modules`, where a bare `require.resolve("playwright")`
+cannot see it. `snq doctor` and `snq-auth` both probe that location, so a green
+`playwright module` line means you need no install even if `npm ls -g` looked bare.
+
+Likewise the browser: `snq auth` launches with `channel: 'chrome'`, using the system
+**Google Chrome** if `/Applications/Google Chrome.app` exists. That sidesteps Playwright's
+pinned-revision problem, where the module wants e.g. Chromium 1212 while the cache holds 1208.
+Don't run `npx playwright install chromium` unless `doctor` reports no usable browser.
+
+If genuinely missing:
+
 ```bash
-npm install -g playwright        # only needed by 'snq auth'
-npx playwright install chromium  # the browser binary
+npm install -g playwright              # the module
+npx playwright install chromium        # only if there is no system Chrome
 ```
+
+Point at a non-standard module location with `SNQ_PLAYWRIGHT_PATH=/path/to/node_modules`.
 
 `curl` and `python3` ship with macOS. `node` is already present if the user runs any JS tooling.
 

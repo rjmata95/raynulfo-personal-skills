@@ -28,10 +28,32 @@ echo "TOOLS"
 for t in curl python3 node; do
   if command -v "$t" >/dev/null 2>&1; then ok "$t"; else problem "$t not found"; fi
 done
-if node -e 'try{require.resolve("playwright")}catch{try{require.resolve("playwright-core")}catch{process.exit(1)}}' 2>/dev/null; then
-  ok "playwright module (needed only by 'snq auth')"
+# Mirror snq-auth's resolution: playwright is commonly nested under
+# @playwright/cli, where a bare require.resolve won't find it.
+PW_FOUND=""
+NPM_ROOT_G="$(npm root -g 2>/dev/null || true)"
+for cand in "${SNQ_PLAYWRIGHT_PATH:-}" "$NPM_ROOT_G" "$NPM_ROOT_G/@playwright/cli/node_modules" "$NPM_ROOT_G/playwright/node_modules"; do
+  [[ -n "$cand" && -d "$cand" ]] || continue
+  if NODE_PATH="$cand" node -e 'require("playwright")' >/dev/null 2>&1 \
+  || NODE_PATH="$cand" node -e 'require("playwright-core")' >/dev/null 2>&1; then
+    PW_FOUND="$cand"; break
+  fi
+done
+if [[ -n "$PW_FOUND" ]]; then
+  ok "playwright module ($PW_FOUND)"
 else
-  problem "playwright module missing — 'snq auth' cannot open a browser. Fix: npm install -g playwright && npx playwright install chromium"
+  problem "playwright module not found — 'snq auth' cannot open a browser. Fix: npm install -g playwright"
+fi
+
+# snq-auth prefers the system Chrome, so a missing bundled Chromium is fine.
+if [[ -d "/Applications/Google Chrome.app" ]]; then
+  ok "system Google Chrome (used by 'snq auth')"
+elif [[ -n "$PW_FOUND" ]] && NODE_PATH="$PW_FOUND" node -e '
+  const {chromium}=require("playwright");
+  require("fs").accessSync(chromium.executablePath());' >/dev/null 2>&1; then
+  ok "Playwright bundled Chromium"
+else
+  problem "no usable browser for 'snq auth'. Fix: install Google Chrome, or npx playwright install chromium"
 fi
 if command -v snq >/dev/null 2>&1; then ok "snq on PATH ($(command -v snq))"; else
   problem "snq not on PATH. Fix: ln -sfn $SCRIPT_DIR/snq ~/.local/bin/snq"

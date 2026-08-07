@@ -63,32 +63,45 @@ snq_ensure_cfg_dir
 mkdir -p "$PROFILE_DIR"
 chmod 700 "$PROFILE_DIR"
 
-# Resolve a playwright module. Prefer an existing install; offer to add one.
-PW_RESOLVED="$(node -e '
-const paths=[];
-try{paths.push(require.resolve("playwright"))}catch{}
-try{paths.push(require.resolve("playwright-core"))}catch{}
-console.log(paths[0]||"");
-' 2>/dev/null || true)"
+# ---------------------------------------------------------------------------
+# Locate a playwright module.
+#
+# Plain require.resolve("playwright") FAILS on a typical setup even when
+# playwright IS installed, because it often lives nested under @playwright/cli
+# (.../@playwright/cli/node_modules/playwright) rather than at the global root.
+# So probe the likely roots and use whichever one loads.
+# ---------------------------------------------------------------------------
+PW_NODE_PATH="${SNQ_PLAYWRIGHT_PATH:-}"
 
-if [[ -z "$PW_RESOLVED" ]]; then
-  cat <<EOF
-snq auth needs the Playwright node module to drive the browser.
+if [[ -z "$PW_NODE_PATH" ]]; then
+  NPM_ROOT="$(npm root -g 2>/dev/null || true)"
+  for cand in \
+    "$NPM_ROOT" \
+    "$NPM_ROOT/@playwright/cli/node_modules" \
+    "$NPM_ROOT/playwright/node_modules" \
+    "$(npm root 2>/dev/null || true)"
+  do
+    [[ -n "$cand" && -d "$cand" ]] || continue
+    if NODE_PATH="$cand" node -e 'require("playwright")' >/dev/null 2>&1 \
+    || NODE_PATH="$cand" node -e 'require("playwright-core")' >/dev/null 2>&1; then
+      PW_NODE_PATH="$cand"; break
+    fi
+  done
+fi
 
-Install it once, globally:
+if [[ -z "$PW_NODE_PATH" ]]; then
+  cat <<'EOF'
+snq auth needs the Playwright node module and could not find one.
 
-    npm install -g playwright
-    npx playwright install chromium
+Checked: npm global root, @playwright/cli's nested modules, local node_modules.
+If you know where it lives, point at it:
 
-Then re-run: snq auth
+    SNQ_PLAYWRIGHT_PATH=/path/to/node_modules snq auth
+
+Otherwise:  npm install -g playwright
 EOF
   exit 1
 fi
-
-PW_ROOT="$(node -e '
-const p=require.resolve("playwright").replace(/\/lib\/.*$/,"");
-console.log(p);
-' 2>/dev/null || dirname "$PW_RESOLVED")"
 
 echo "snq auth"
 echo "  instance: $SNQ_URL"
@@ -101,7 +114,7 @@ echo ""
 TMP_OUT="$(mktemp "${TMPDIR:-/tmp}/snq-auth.XXXXXX")"
 trap 'rm -f "$TMP_OUT"' EXIT
 
-NODE_PATH="$(dirname "$PW_ROOT")" \
+NODE_PATH="$PW_NODE_PATH" \
 SNQ_URL="$SNQ_URL" \
 SNQ_PROFILE="$PROFILE_DIR" \
 SNQ_HEADLESS="$HEADLESS" \
@@ -119,11 +132,34 @@ const HEADLESS = process.env.SNQ_HEADLESS === '1';
 const fs = require('fs');
 
 (async () => {
-  const ctx = await chromium.launchPersistentContext(PROFILE, {
+  // Prefer the system Google Chrome over Playwright's pinned build. The bundled
+  // module often pins a Chromium revision that isn't in the local cache, and
+  // downloading one just to show a login page is wasteful. channel:'chrome'
+  // uses /Applications/Google Chrome.app directly.
+  const base = {
     headless: HEADLESS,
     viewport: null,
     args: ['--no-first-run', '--no-default-browser-check'],
-  });
+  };
+
+  let ctx;
+  try {
+    ctx = await chromium.launchPersistentContext(PROFILE, { ...base, channel: 'chrome' });
+  } catch (e) {
+    // No system Chrome — fall back to Playwright's own browser if it's present.
+    try {
+      ctx = await chromium.launchPersistentContext(PROFILE, base);
+    } catch (e2) {
+      console.error('snq auth: could not launch a browser.');
+      console.error('  system Chrome: ' + e.message.split('\n')[0]);
+      console.error('  bundled build: ' + e2.message.split('\n')[0]);
+      console.error('');
+      console.error('Fix either one:');
+      console.error('  - install Google Chrome, or');
+      console.error('  - npx playwright install chromium');
+      process.exit(5);
+    }
+  }
 
   const page = ctx.pages()[0] || await ctx.newPage();
 
