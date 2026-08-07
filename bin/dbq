@@ -168,13 +168,34 @@ cmd_dump_cmd() {
 }
 
 cmd_collections() {
-  local alias="${1:-}" idx kind
+  local alias="${1:-}" idx kind ddb
   [ -n "$alias" ] || dbq_die "usage: dbq --collections <alias>"
   reg_load
   idx=$(reg_index "$alias") || dbq_die "unknown alias '$alias'"
   kind="${REG_KIND[$idx]}"
+  ddb="${DBQ_DB:-${REG_DDB[$idx]}}"
+
   case "$kind" in
-    mongo) dispatch_query "$alias" 'db.getCollectionNames().forEach(function (c) { print(c); })' ;;
+    mongo)
+      # Mongo aliases are CLUSTERS hosting many per-service databases. With no
+      # database selected, listing collections would query a nonexistent default
+      # and return nothing — so list the databases instead and say so.
+      if [ -z "$ddb" ] || [ "$ddb" = "-" ]; then
+        printf '%s%s is a cluster; no database selected. Databases:%s\n' \
+          "$C_DIM" "$alias" "$C_RESET" >&2
+        dispatch_query "$alias" '
+          (function () {
+            var r = db.adminCommand({ listDatabases: 1, nameOnly: true });
+            r.databases.map(function (d) { return d.name; })
+              .filter(function (n) { return ["admin","local","config"].indexOf(n) < 0; })
+              .sort().forEach(function (n) { print(n); });
+          })()'
+        printf '\n%sThen: DBQ_DB=<database> dbq --collections %s%s\n' \
+          "$C_DIM" "$alias" "$C_RESET" >&2
+      else
+        dispatch_query "$alias" 'db.getCollectionNames().sort().forEach(function (c) { print(c); })'
+      fi
+      ;;
     mysql) dispatch_query "$alias" 'SHOW TABLES' ;;
   esac
 }

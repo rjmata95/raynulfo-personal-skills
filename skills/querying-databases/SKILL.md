@@ -30,37 +30,70 @@ dbq --list                        # aliases, credential state, knowledge coverag
 If an alias shows `missing`, tell the user to run `dbq init` — **do not try to configure
 credentials yourself** (see "Never touch credentials" below).
 
+## Mongo aliases are CLUSTERS, not databases
+
+Read this before your first Mongo query. Each Mongo alias connects to a **cluster** hosting
+many per-service databases (`medication` has 20). **There is no database named `medication`,
+`patient`, or `encounter`.**
+
+Getting this wrong fails quietly: querying a nonexistent database returns an empty result with
+`ok: 1` and no error, which looks exactly like "no data found".
+
+```bash
+dbq --collections medication                              # lists DATABASES
+DBQ_DB=patient-prescription-query dbq --collections medication   # then COLLECTIONS
+```
+
+Databases follow the platform's CQRS split — `<service>-cmd` (event-sourced writes) and
+`<service>-query` (read projections). **Prefer `-query` for investigation.** `-data-relay`
+databases are integration staging, useful when tracing what an external system received.
+
+MySQL aliases *do* have a working default database (`DASHBOARD_PROD`), so this only applies to
+Mongo.
+
 ## Querying
 
 `dbq` passes real `mongosh` / `mysql` syntax straight through. There is no dbq dialect.
 
 ```bash
-# Mongo — argument is a mongosh expression, `db` is already connected
-dbq medication 'db.patientPrescription.countDocuments({tenantId:"5740b0c5-a442-4e04-b961-2a1a0b5dc399"})'
-dbq patient 'db.patient.findOne({_id:"..."}, {firstName:1, lastName:1})'
+# Mongo — name the database, then the collection
+DBQ_DB=patient-prescription-query dbq medication \
+  'db["patient-prescription"].countDocuments({tenantId:"5740b0c5-a442-4e04-b961-2a1a0b5dc399"})'
 
-# MySQL — argument is SQL
+# …or switch databases inline
+dbq medication 'db.getSiblingDB("pharmacy-query")["pharmacy"].findOne({}, {name:1})'
+
+# MySQL — argument is SQL, default database already selected
 dbq mysql-prod 'SELECT office_id, name FROM office LIMIT 5'
-
-# Override the default database
-DBQ_DB=admin dbq medication 'db.runCommand({connectionStatus:1})'
 
 # Run a saved script (see Scratch below)
 dbq --file medication ~/.dbq/scratch/2026-08-07/trace-rx.js
 ```
+
+**Use bracket syntax for hyphenated names.** `db["patient-prescription"]`, never
+`db.patient-prescription` — `-` is subtraction in JavaScript, so dot notation yields an error
+or `NaN`. Nearly every database name on these clusters is hyphenated.
 
 **Always include `tenantId` in production Mongo queries.** The PROD tenant is
 `5740b0c5-a442-4e04-b961-2a1a0b5dc399`. Most indexes are tenant-prefixed, so omitting it
 turns an indexed lookup into a collection scan. This is the single most common performance
 mistake in this codebase.
 
+Nonprod tenant IDs differ — the prod tenant matches nothing in `medication-nonprod`.
+
 ## Exploring shape
 
 ```bash
-dbq --collections medication              # list collections / tables
-dbq --schema medication.patientPrescription       # field/type map + indexes, samples 200
-dbq --schema patient.patient 1000                 # sample more for sparse fields
+dbq --collections medication                                    # databases (no db selected)
+DBQ_DB=encounter-type-query dbq --collections encounter         # collections in that db
+DBQ_DB=encounter-type-query dbq --schema encounter.encounter-types      # field map + indexes
+DBQ_DB=patient-demographic-query dbq --schema patient.<collection> 1000 # sample more
+dbq --schema mysql-prod.PAT_MEDICATIONS                         # DESCRIBE + SHOW INDEX
 ```
+
+**Check the `_id` type before building a lookup.** It is a string UUID in some collections and
+a genuine `ObjectId` in others (confirmed `ObjectId` in `encounter-types`). Wrapping in
+`ObjectId()` against a string `_id` matches nothing silently.
 
 `--schema` derives the map by sampling real documents and reports presence percentages —
 so a field at `12%` tells you it is optional in practice, whatever the code claims. It also

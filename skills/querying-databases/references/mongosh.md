@@ -1,12 +1,36 @@
 # mongosh patterns through `dbq`
 
-`dbq <alias> '<expr>'` evaluates `<expr>` in `mongosh` with `db` already connected to the
-alias's default database. Everything below is plain mongosh — no dbq-specific syntax.
+`dbq <alias> '<expr>'` evaluates `<expr>` in `mongosh` with `db` connected to the alias's
+cluster. Everything below is plain mongosh — no dbq-specific syntax.
+
+## First: select a database
+
+Every Mongo alias is a **cluster** hosting many per-service databases. There is no database
+matching the alias name, and querying a nonexistent one returns empty with `ok: 1` — silent,
+not an error.
+
+```bash
+dbq --collections medication                       # list databases
+DBQ_DB=pharmacy-query dbq medication 'db["pharmacy"].countDocuments({tenantId:"..."})'
+dbq medication 'db.getSiblingDB("pharmacy-query")["pharmacy"].findOne()'
+```
+
+Prefer `<service>-query` (read projection) over `<service>-cmd` (event-sourced aggregate).
+
+## Bracket syntax for hyphenated names
+
+`db.patient-prescription` parses as `db.patient` minus `prescription`. Almost every name on
+these clusters is hyphenated, so this bites constantly:
+
+```javascript
+db["patient-prescription"].findOne()                        // correct
+db.getSiblingDB("patient-prescription-query")["x"].find()   // correct
+```
 
 ## Always scope by tenant
 
 ```javascript
-db.patientPrescription.countDocuments({ tenantId: "5740b0c5-a442-4e04-b961-2a1a0b5dc399" })
+db["patient-prescription"].countDocuments({ tenantId: "5740b0c5-a442-4e04-b961-2a1a0b5dc399" })
 ```
 
 Most indexes are tenant-prefixed. Omitting `tenantId` turns an indexed lookup into a
@@ -18,13 +42,14 @@ codebase — do it once on a large collection and you will notice.
 `dbq` runs mongosh with `--json=relaxed`, so output is parseable:
 
 ```bash
-dbq patient 'db.patient.findOne({_id:"<id>"}, {firstName:1})' | jq .
+DBQ_DB=patient-demographic-query dbq patient \
+  'db["patient"].findOne({tenantId:"<tenantId>"}, {_id:1})' | jq .
 ```
 
 `print()` writes raw lines instead, which is better for lists and progress:
 
 ```bash
-dbq medication 'db.getCollectionNames().forEach(function (c) { print(c); })'
+DBQ_DB=pharmacy-query dbq medication 'db.getCollectionNames().forEach(function (c) { print(c); })'
 ```
 
 ## Projections keep output small
@@ -33,7 +58,7 @@ Never return whole documents when you need three fields. It floods context and d
 the transcript for no reason.
 
 ```javascript
-db.patientPrescription.find(
+db["patient-prescription"].find(
   { tenantId: "5740b0c5-a442-4e04-b961-2a1a0b5dc399", status: "ACTIVE" },
   { _id: 1, patientId: 1, pharmacyId: 1, writtenDate: 1 }
 ).limit(20)
@@ -43,7 +68,7 @@ db.patientPrescription.find(
 
 ```javascript
 // Count by status — cheap way to learn an enum's real values
-db.patientPrescription.aggregate([
+db["patient-prescription"].aggregate([
   { $match: { tenantId: "5740b0c5-a442-4e04-b961-2a1a0b5dc399" } },
   { $group: { _id: "$status", n: { $sum: 1 } } },
   { $sort: { n: -1 } }
@@ -57,7 +82,7 @@ collection big".
 ## Check the index before writing the query
 
 ```javascript
-db.patientPrescription.getIndexes()
+db["patient-prescription"].getIndexes()
 ```
 
 Or `dbq --schema <alias>.<collection>`, which prints indexes alongside the field map.
@@ -68,7 +93,7 @@ and one filtering `tenantId` alone, but not one filtering `status` alone.
 ## Explain when something is slow
 
 ```javascript
-db.patientPrescription.find({ tenantId: "...", status: "ACTIVE" })
+db["patient-prescription"].find({ tenantId: "...", status: "ACTIVE" })
   .explain("executionStats").executionStats
 ```
 
@@ -82,7 +107,7 @@ Quoting nested JS on one line gets unpleasant fast. Write it to scratch instead:
 ```bash
 cat > "$(dbq scratch)/trace-rx.js" <<'EOF'
 const TENANT = "5740b0c5-a442-4e04-b961-2a1a0b5dc399";
-const rx = db.patientPrescription.findOne({ tenantId: TENANT, _id: "<id>" });
+const rx = db["patient-prescription"].findOne({ tenantId: TENANT, _id: "<id>" });
 printjson({ found: !!rx, status: rx && rx.status, hasPharmacy: !!(rx && rx.pharmacyId) });
 EOF
 
@@ -93,21 +118,41 @@ Scratch is pruned after 7 days. Anything worth keeping belongs in a repo or in `
 
 ## Cross-database in one connection
 
+A single alias reaches every database on its cluster, which is what makes tracing across the
+CQRS split cheap:
+
 ```bash
 DBQ_DB=admin dbq medication 'db.runCommand({connectionStatus: 1})'
 ```
 
-Or `db.getSiblingDB()` inside the expression:
+Or `db.getSiblingDB()` inside the expression — useful for comparing the write and read sides
+in one query:
 
 ```javascript
-db.getSiblingDB("medication").patientPrescription.countDocuments({ tenantId: "..." })
+var TENANT = "5740b0c5-a442-4e04-b961-2a1a0b5dc399";
+print("cmd:   " + db.getSiblingDB("patient-prescription-cmd")["patient-prescription"]
+        .countDocuments({ tenantId: TENANT }));
+print("query: " + db.getSiblingDB("patient-prescription-query")["patient-prescription"]
+        .countDocuments({ tenantId: TENANT }));
+```
+
+A gap between the two usually means projection lag or a failed event handler.
+
+List what is available first — collection names differ between `-cmd` and `-query`:
+
+```bash
+dbq --collections medication                                  # databases
+DBQ_DB=patient-prescription-query dbq --collections medication # collections
 ```
 
 ## Gotchas
 
-- **`ObjectId` vs string `_id`.** Collections in this platform commonly use string UUIDs, not
-  `ObjectId`. Querying `ObjectId("...")` against a string `_id` silently matches nothing.
-  Check `dbq --schema` for the `_id` type first.
+- **`ObjectId` vs string `_id` — varies per collection.** Some collections use string UUIDs,
+  others genuine `ObjectId`s (confirmed `ObjectId` in `encounter-types`, 100% of a 50-doc
+  sample). There is no platform-wide rule. Querying the wrong type silently matches nothing.
+  **Always check `dbq --schema <alias>.<collection>` first**, and prefer the business key
+  (`encounterTypeId`, `prescriptionId`) over `_id` — it is usually indexed and is what other
+  services reference.
 - **Dates.** Stored as BSON dates; compare with `new Date("2026-01-01")`, not a string.
 - **`null` vs missing.** `{field: null}` matches both explicit null and absent. Use
   `{field: {$type: "null"}}` for explicitly-null, `{field: {$exists: false}}` for absent.
