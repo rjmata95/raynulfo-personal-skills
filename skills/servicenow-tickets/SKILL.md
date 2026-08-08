@@ -70,11 +70,42 @@ Dot-walk references with `assigned_to.name=...`.
 Writes need the CSRF token (`g_ck`) that `snq auth` captures alongside the cookie. If it's
 missing, every write fails with a directed error — that's the token, not your syntax.
 
+### Creating: pass caller, impact, and urgency every time
+
+**The Table API writes only the fields you send — the form's defaults do not apply.** Omit
+`caller_id`, `impact`, or `urgency` and the ticket is created with them *blank*, which the human
+then has to fix by hand. `opened_by` gets set from your session automatically, so the ticket
+*looks* correctly attributed while `caller_id` — the field triage and notifications actually
+read — is empty. This has already happened once (see `references/gotchas.md`, 2026-08-07).
+
+Priority is derived from impact × urgency on this instance: **Medium/Medium → P3 Moderate**,
+Medium/Low → P4 Low, Low/Low → P5 Planning. Set impact and urgency rather than only `--priority`,
+or a business rule may recompute priority out from under you.
+
 ```bash
+CALLER=$(snq whoami --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["user_sys_id"])')
+
 snq inc create --desc "Eventing engine 3.4.0 readiness probe regression" \
                --details "Five services on 3.4.0 lack health group config." \
-               --priority 3
+               --impact 2 --urgency 2 \
+               --caller "$CALLER"
+```
 
+`snq whoami` alone does not print the sys_id — only `--json` exposes it, as `result.user_sys_id`.
+Reference fields (`--caller`, `--group`, `--assign`) want a **sys_id**, not a display name.
+
+After any create, **read the ticket back and confirm the fields you care about are populated.**
+`inc get` omits empty fields entirely rather than showing them blank, so a missing field is a
+missing *line* — easy to scan straight past.
+
+```bash
+snq inc create --desc "..." --impact 2 --urgency 2 --caller "$CALLER"
+snq inc get INC0012345          # verify impact / urgency / caller_id are all present
+```
+
+### Updating
+
+```bash
 snq inc update  INC0012345 --priority 2 --state 2
 snq inc comment INC0012345 "Rolled back to 3.3.12; monitoring."   # customer-visible
 snq inc worknote INC0012345 "Internal: suspect commit 3bec534."   # internal only
@@ -148,6 +179,20 @@ into ServiceNow work notes — link instead.
 Reads generally work for any authenticated user. Writing to `incident` needs the `itil` role.
 A 403 after a successful read means roles, not session — say so plainly rather than suggesting
 re-auth.
+
+The audit and metadata tables are closed to an ordinary `itil` account: `sys_audit` returns 403,
+`sys_history_line` returns rows with every field `null`, and `sys_dictionary` returns zero rows.
+So you cannot reconstruct who-changed-what, nor introspect whether a field is mandatory or
+calculated — determine field behaviour empirically and ask the human to read the UI Activity
+stream when history matters.
+
+## Gotchas journal
+
+`references/gotchas.md` is the append-only record of API behaviour that surprised us — fields the
+Table API silently leaves blank, permission walls that read like session failures, business rules
+that overwrite what you sent. **Read it before your first write in a session, and append to it
+whenever a human has to fix something by hand after `snq` reported success.** Newest entry on
+top; never rewrite an old entry, append a correction instead. Never record session material.
 
 ## Setup
 
