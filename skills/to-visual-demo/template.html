@@ -45,6 +45,13 @@
   /* TLDR: verdict + tiles. Keep above the fold. */
   .verdict{background:var(--surface-1);border:1px solid var(--border);border-left:4px solid var(--warning);border-radius:10px;padding:18px 22px;margin-bottom:24px}
   .verdict strong{font-size:19px}
+  /* Recommendation — sits directly under the verdict, above the tiles. */
+  .rec{background:var(--surface-1);border:1px solid var(--border);border-left:4px solid var(--series-1);
+       border-radius:10px;padding:16px 20px;margin-bottom:24px}
+  .rec-label{font-size:11.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);font-weight:600;margin-bottom:6px}
+  .rec-call{font-size:17px}
+  .mermaid{margin:0;text-align:center}
+  .mermaid svg{max-width:100%;height:auto}
   .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
   .tile{background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:16px 18px}
   .tile .q{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
@@ -122,10 +129,40 @@
     <p style="margin:8px 0 0;color:var(--ink-2)">{{≤60 words. What was claimed vs what is true.}}</p>
   </div>
 
+  <!-- ============ RECOMMENDATION — stays HIGH. Reader goes TLDR → here → tiles. ============ -->
+  <div class="rec">
+    <div class="rec-label">Recommendation</div>
+    <p style="margin:0 0 8px"><b class="rec-call">{{The call. Include "don't do X" if that's the advice.}}</b></p>
+    <p style="margin:0;color:var(--ink-2);font-size:14px">{{Cost / tradeoff / sequencing. ≤40 words.}}</p>
+  </div>
+
   <div class="tiles">
     <div class="tile"><div class="q">{{Question 1}}</div><div class="a a-bad">{{Answer}}</div><div class="why">{{≤15 words}}</div></div>
     <div class="tile"><div class="q">{{Question 2}}</div><div class="a a-bad">{{Answer}}</div><div class="why">{{≤15 words}}</div></div>
     <div class="tile"><div class="q">{{Question 3}}</div><div class="a a-good">{{Answer}}</div><div class="why">{{≤15 words}}</div></div>
+  </div>
+
+  <!-- ============ DIAGRAM — the story. Mark the bad path. Delete if nothing has a path. ============ -->
+  <h2>{{Where it goes wrong}}</h2>
+  <div class="card">
+    <!-- NOTE 1: Mermaid's parser REJECTS var(&#45;&#45;x) inside classDef/linkStyle (it errors with
+         "Parse error ... Expecting 'SEMI'") and needs literal hex, so __BAD__ and __INK__ are
+         substituted with real hex at runtime.
+         NOTE 2: linkStyle counts EVERY link in declaration order from 0, not just the branches.
+         Below: A to B is 0, B to C is 1, B to D is 2. An off-by-one here silently paints the
+         CORRECT edge red, which is worse than no color at all. Always confirm on the screenshot.
+         NOTE 3: never put a bare "--" inside this comment; it terminates it and the rest leaks
+         onto the page as visible text. -->
+    <pre class="mermaid" id="dg">
+flowchart LR
+  A["{{entry}}"] --> B{"{{the decision}}"}
+  B -->|"{{good}}"| C["{{correct outcome}}"]
+  B -->|"{{bad — label THIS one}}"| D["{{wrong outcome}}"]
+  classDef bad fill:none,stroke:__BAD__,stroke-width:2px,color:__INK__
+  class D bad
+  linkStyle 2 stroke:__BAD__,stroke-width:2px
+    </pre>
+    <div class="note">{{One line naming the edge that matters — don't re-narrate the whole diagram.}}</div>
   </div>
 
   <!-- ============ LIVE DEMO ============ -->
@@ -282,7 +319,41 @@ $('bars').innerHTML = ROWS.map(d => `
 $('themeBtn').addEventListener('click', () => {
   const c = document.documentElement.getAttribute('data-theme');
   document.documentElement.setAttribute('data-theme', c === 'dark' ? 'light' : 'dark');
+  drawDiagram();   // Mermaid bakes colors into the SVG at render time — must re-run on theme change
 });
+</script>
+
+<!-- ============ MERMAID ============
+     Needs a network fetch for the CDN — if the page must work offline, hand-write the SVG instead.
+     startOnLoad:false + explicit run() so we control WHEN it draws (and can redraw on theme flip).
+     Mermaid resolves colors at render time, so pass real hex read from the live CSS vars — it does
+     NOT understand var(--x) in its own theme config. -->
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  const src = document.getElementById('dg')?.textContent;
+  const v = n => getComputedStyle(document.querySelector('.viz-root')).getPropertyValue(n).trim();
+
+  window.drawDiagram = async () => {
+    const el = document.getElementById('dg'); if (!el || !src) return;
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'base',
+      securityLevel: 'strict',
+      themeVariables: {
+        background: v('--surface-1'), primaryColor: v('--surface-1'),
+        primaryTextColor: v('--ink'), primaryBorderColor: v('--axis'),
+        lineColor: dark ? v('--ink-2') : v('--ink-2'),
+        secondaryColor: v('--page'), tertiaryColor: v('--page'),
+        fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif', fontSize: '14px'
+      }
+    });
+    el.removeAttribute('data-processed');
+    // Substitute real hex for the placeholders — Mermaid cannot parse var(--x).
+    el.textContent = src.replace(/__BAD__/g, v('--critical')).replace(/__INK__/g, v('--ink'));
+    await mermaid.run({ nodes: [el] });
+  };
+  drawDiagram();
 </script>
 </body>
 </html>
