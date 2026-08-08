@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<!-- to-visual-demo template. Fill {{SLOTS}}, delete unused blocks.
+     Palette is pre-validated (light+dark) — don't invent colors. -->
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1:#fcfcfb; --page:#f9f9f7; --ink:#0b0b0b; --ink-2:#52514e;
+    --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,0.10);
+    --series-1:#2a78d6; --series-2:#eb6834;
+    --good:#0ca30c; --good-text:#006300; --warning:#fab219; --critical:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1:#1a1a19; --page:#0d0d0d; --ink:#fff; --ink-2:#c3c2b7;
+      --muted:#898781; --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10);
+      --series-1:#3987e5; --series-2:#d95926; --good-text:#0ca30c;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1:#1a1a19; --page:#0d0d0d; --ink:#fff; --ink-2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10);
+    --series-1:#3987e5; --series-2:#d95926; --good-text:#0ca30c;
+  }
+
+  *{box-sizing:border-box} html,body{margin:0}
+  body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--page);color:var(--ink);line-height:1.5}
+  /* color MUST be set here, not on body: the vars live on .viz-root, so body's
+     color would resolve against :root where --ink is undefined → black on black in dark mode. */
+  .viz-root{background:var(--page);color:var(--ink);min-height:100vh;padding:32px 24px 80px}
+  .wrap{max-width:1080px;margin:0 auto}
+  h1{font-size:30px;line-height:1.2;margin:0 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--ink-2);font-size:15px;margin:0 0 28px}
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin:40px 0 14px;font-weight:600}
+  p{margin:0 0 12px} .lead{font-size:17px}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em;background:var(--page);border:1px solid var(--border);border-radius:4px;padding:1px 5px}
+  .card{background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:20px 22px}
+
+  /* TLDR: verdict + tiles. Keep above the fold. */
+  .verdict{background:var(--surface-1);border:1px solid var(--border);border-left:4px solid var(--warning);border-radius:10px;padding:18px 22px;margin-bottom:24px}
+  .verdict strong{font-size:19px}
+  .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .tile{background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:16px 18px}
+  .tile .q{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
+  .tile .a{font-size:27px;font-weight:650;margin:6px 0 2px;letter-spacing:-.02em}
+  .tile .why{font-size:13px;color:var(--ink-2)}
+  .a-bad{color:var(--critical)} .a-good{color:var(--good-text)}
+
+  .demo{display:grid;grid-template-columns:1.05fr .95fr;gap:20px;align-items:start}
+  @media (max-width:900px){.demo{grid-template-columns:1fr}.tiles{grid-template-columns:1fr}}
+
+  .modebar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+  .modebar button{font:inherit;font-size:13px;font-weight:550;padding:7px 13px;border-radius:7px;cursor:pointer;background:var(--surface-1);color:var(--ink-2);border:1px solid var(--axis)}
+  .modebar button[aria-pressed="true"]{background:var(--ink);color:var(--surface-1);border-color:var(--ink)}
+
+  /* Replica of the real UI. NOTE: no overflow:hidden — it clips tooltips. */
+  .replica{background:var(--surface-1);border:1px solid var(--border);border-radius:10px;display:flex}
+  .band{width:6px;flex:none;background:var(--axis);border-radius:9px 0 0 9px}
+  .band.warn{background:var(--critical)} .band.ok{background:var(--good)}
+  .replica-body{padding:16px 18px;flex:1;min-width:0}
+  .ta-row{position:relative}
+  textarea{width:100%;min-height:78px;resize:vertical;font:inherit;font-size:14px;padding:10px 12px;border-radius:7px;border:1px solid var(--axis);background:var(--page);color:var(--ink)}
+  textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px} /* add .mono when input is JSON/code */
+  .srcline{font-size:12.5px;color:var(--muted);margin:-4px 0 14px} /* provenance under a demo heading */
+  /* Hover tooltip. Pick the direction that does NOT cover what it explains:
+     below the trigger (top:26px) when the trigger sits under the thing being explained,
+     above it (bottom:32px) when the trigger is at the bottom edge. Verify by screenshot.
+     BOTH bounds need the calc() clamp: max-width alone still overflows at 375px, and
+     vw units include the scrollbar. Verified 0px overflow at 375px. */
+  .tip{position:absolute;z-index:20;left:0;top:26px;width:max-content;
+       min-width:min(330px,calc(100vw - 72px));max-width:min(400px,calc(100vw - 72px));
+       background:var(--surface-1);color:var(--ink);border:1px solid var(--border);
+       box-shadow:5px 5px 10px 1px rgba(0,0,0,.2);border-radius:6px;padding:10px 12px;
+       font-size:13px;text-align:center;opacity:0;visibility:hidden;transition:opacity .12s}
+  /* focus-visible too — hover alone locks out keyboard users. Trigger needs tabindex="0". */
+  .hoverable:hover .tip,.hoverable:focus-visible .tip{opacity:1;visibility:visible}
+
+  table{border-collapse:collapse;width:100%;font-size:13.5px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--grid);vertical-align:top}
+  th{font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);font-weight:600}
+  td.num{font-variant-numeric:tabular-nums}
+  tr.bad td{background:color-mix(in oklab,var(--critical) 7%,transparent)}
+  .tick{color:var(--good-text);font-weight:700} .cross{color:var(--critical);font-weight:700}
+
+  /* Bars. NOTE: display:block required — spans default to inline and collapse. */
+  .bars{display:grid;gap:9px}
+  .bar-row{display:grid;grid-template-columns:62px 1fr auto;gap:10px;align-items:center;font-size:13px}
+  .bar-track{display:block;background:var(--page);border:1px solid var(--border);border-radius:4px;height:22px;overflow:hidden}
+  .bar-fill{display:block;height:100%;border-radius:0 4px 4px 0;background:var(--series-1)}
+  .bar-val{font-variant-numeric:tabular-nums;color:var(--ink-2);font-weight:600;min-width:66px;text-align:right}
+  .yr{color:var(--ink-2);font-variant-numeric:tabular-nums}
+  .split{display:flex;height:34px;border-radius:7px;overflow:hidden;gap:2px;margin:6px 0 10px}
+  .split div{display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:650;color:#fff}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:2px 9px;border-radius:999px;border:1px solid var(--border);color:var(--ink-2);background:var(--page)}
+  .dot{width:8px;height:8px;border-radius:50%;flex:none}
+
+  .note{font-size:13px;color:var(--ink-2);background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--series-1);border-radius:7px;padding:12px 14px;margin-top:14px}
+  .caveat{border-left-color:var(--warning)}
+  ul{margin:8px 0 0;padding-left:20px} li{margin-bottom:6px}
+  .fix{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px;background:var(--surface-1);border:1px solid var(--border);border-radius:8px;padding:14px 16px;overflow-x:auto}
+  .del{color:var(--critical)} .ins{color:var(--good-text)}
+  .toggle{position:fixed;top:14px;right:16px;font:inherit;font-size:12px;padding:6px 11px;border-radius:7px;cursor:pointer;background:var(--surface-1);color:var(--ink-2);border:1px solid var(--axis)}
+</style>
+</head>
+<body>
+<div class="viz-root">
+<button class="toggle" id="themeBtn">◐ theme</button>
+<div class="wrap">
+
+  <h1>{{HEADLINE — the subject, not "Report on…"}}</h1>
+  <p class="sub">{{where this lives · how it was verified · date}}</p>
+
+  <!-- ============ TLDR (mandatory) ============ -->
+  <div class="verdict">
+    <strong>{{The one sentence that changes the reader's mind.}}</strong>
+    <p style="margin:8px 0 0;color:var(--ink-2)">{{≤60 words. What was claimed vs what is true.}}</p>
+  </div>
+
+  <div class="tiles">
+    <div class="tile"><div class="q">{{Question 1}}</div><div class="a a-bad">{{Answer}}</div><div class="why">{{≤15 words}}</div></div>
+    <div class="tile"><div class="q">{{Question 2}}</div><div class="a a-bad">{{Answer}}</div><div class="why">{{≤15 words}}</div></div>
+    <div class="tile"><div class="q">{{Question 3}}</div><div class="a a-good">{{Answer}}</div><div class="why">{{≤15 words}}</div></div>
+  </div>
+
+  <!-- ============ LIVE DEMO ============ -->
+  <h2>Try it — this is the real thing, running</h2>
+  <p class="lead" style="max-width:74ch">{{One line: what to do. "Pick a mode, then type."}}</p>
+  <!-- Provenance line: names the source the logic was transcribed from. Non-negotiable #2. -->
+  <p class="srcline">Both rules below are copied verbatim from <code>{{file:line}}</code> and
+    <code>{{file:line}}</code> — you are driving the real logic, not a mock-up.</p>
+
+  <div class="modebar" id="modebar">
+    <button data-mode="a" aria-pressed="true">{{Mode A · the broken case}}</button>
+    <button data-mode="b" aria-pressed="false">{{Mode B · fine}}</button>
+  </div>
+
+  <div class="demo">
+    <div>
+      <div class="replica">
+        <div class="band" id="band"></div>
+        <div class="replica-body">
+          <div style="font-weight:650;font-size:15px" id="title">{{subject}}</div>
+          <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px" id="meta">{{context}}</div>
+          <div class="ta-row">
+            <textarea id="input" placeholder="{{…}}" spellcheck="false"></textarea>
+            <span class="hoverable" tabindex="0" style="position:relative;display:inline-block;margin-top:8px;cursor:help" id="hoverEl">
+              {{trigger}}<span class="tip" id="tip"></span>
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="note" id="liveVerdict"></div>
+    </div>
+
+    <!-- ============ COMPARISON ============ -->
+    <div class="card">
+      <h2 style="margin-top:0">{{What each signal says}}</h2>
+      <table>
+        <thead><tr><th>{{Signal}}</th><th style="width:96px">Says</th><th style="width:64px">Right?</th></tr></thead>
+        <tbody id="signals"></tbody>
+      </table>
+      <div class="note caveat">{{The one asymmetry to notice.}}</div>
+    </div>
+  </div>
+
+  <!-- ============ DATA (source + caveat mandatory) ============ -->
+  <h2>{{How often / how much}}</h2>
+  <div class="card">
+    <p style="margin-bottom:2px"><b>{{big number}}</b> {{of what}} — {{why it matters}}.</p>
+    <div class="split" id="split"></div>
+    <div style="font-size:12.5px;color:var(--muted);margin-bottom:22px">
+      <span class="pill"><span class="dot" style="background:var(--series-1)"></span>{{label — x%}}</span>
+      <span class="pill"><span class="dot" style="background:var(--axis)"></span>{{rest — y%}}</span>
+    </div>
+    <div style="font-size:13px;font-weight:600;color:var(--ink-2);margin-bottom:10px">{{series title}}</div>
+    <div class="bars" id="bars"></div>
+    <div class="note caveat">{{Source. What's partial. What you could NOT verify.}}</div>
+  </div>
+
+  <!-- ============ RECOMMENDATION ============ -->
+  <h2>The fix</h2>
+  <div class="card">
+    <p style="margin-bottom:12px">{{What changes, in one line.}}</p>
+    <div class="fix">
+<span style="color:var(--muted)">{{file:line}}</span><br>
+<span class="del">-  {{old}}</span>  <span style="color:var(--muted)">← {{why wrong}}</span><br>
+<span class="ins">+  {{new}}</span>
+    </div>
+    <div class="note">
+      <b>Recommendation: {{the call — including "don't do X" if that's the advice}}.</b> {{cost/tradeoff}}
+      <ul><li>{{caveat}}</li><li>{{scope limit}}</li><li>{{what was NOT verified}}</li></ul>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+/* ================================================================
+   REAL LOGIC — transcribe VERBATIM from source, cite file:line.
+   Never paraphrase: the page's credibility is that this is the code.
+
+   Names are deliberately neutral (sideA/sideB) — RENAME to fit the finding.
+   Two shapes of finding, both fine:
+     - one side is WRONG  → rename to buggy/correct, mark one ✗
+     - two sides DISAGREE → keep neutral, mark neither ✗; the recommendation picks one
+   ================================================================ */
+// {{path/to/file.js:LINE}}  {{what this one decides}}
+function sideA(state) { return {{...}}; }
+// {{path/to/other.js:LINE}}  {{what this one decides}}
+function sideB(state) { return {{...}}; }
+
+/* Add as many modes as the finding needs — 2 minimum (diverging + non-diverging),
+   a 3rd if "not every case diverges" is part of the point. */
+const MODES = {
+  a: { state: {{...}}, title: '{{…}}', meta: '{{…}}' },
+  b: { state: {{...}}, title: '{{…}}', meta: '{{…}}' }
+};
+
+let mode = 'a';
+const $ = id => document.getElementById(id);
+
+function render() {
+  const m = MODES[mode];
+  /* If the demo takes free-text input, ALWAYS handle unparseable input —
+     show a "waiting for valid input" state, never let it throw. */
+  const v = $('input').value;
+  const a = sideA(m.state), b = sideB(m.state);
+  const diverges = a !== b;
+
+  $('title').textContent = m.title;
+  $('meta').textContent = m.meta;
+  $('tip').innerHTML = `{{tooltip text with <b>${a}</b>}}`;
+  $('band').className = 'band' + (diverges ? ' warn' : ' ok');
+
+  const tick = '<span class="tick">✓</span>', cross = '<span class="cross">✗</span>';
+  /* 3rd column: use ✗ only when a side is genuinely WRONG.
+     For a disagreement, put the divergence on the row and leave both ✓. */
+  $('signals').innerHTML = [
+    ['{{signal A}} <span style="font-size:12px;color:var(--muted)">{{file:line}}</span>', a, tick],
+    ['<b>{{signal B}}</b><br><span style="font-size:12px;color:var(--muted)">{{why it is easy to miss}}</span>',
+     b, diverges ? cross : tick]
+  ].map(([label, says, ok]) =>
+    `<tr class="${ok === cross ? 'bad' : ''}"><td>${label}</td><td class="num">${says}</td><td>${ok}</td></tr>`
+  ).join('');
+
+  $('liveVerdict').innerHTML = diverges
+    ? `<b>{{This is the bug.}}</b> {{what the reader is looking at}}`
+    : `<b>{{No contradiction here.}}</b> {{why this mode is fine}}`;
+}
+$('input').addEventListener('input', render);
+$('modebar').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  mode = b.dataset.mode;
+  [...$('modebar').children].forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  render();
+});
+$('input').value = '{{prefill the FAILING case so the bug is visible on open}}';
+render();
+
+/* ---- data ---- */
+const PART = {{n}}, TOTAL = {{n}}, pct = PART / TOTAL * 100;
+$('split').innerHTML =
+  `<div style="flex:${pct};background:var(--series-1)">${pct.toFixed(1)}%</div>` +
+  `<div style="flex:${100 - pct};background:var(--axis);color:var(--ink)">${(100 - pct).toFixed(1)}%</div>`;
+
+const ROWS = [{ k: '{{2025}}', v: {{n}} }, { k: '{{2026}}', v: {{n}}, partial: true }];
+const max = Math.max(...ROWS.map(d => d.v));
+$('bars').innerHTML = ROWS.map(d => `
+  <div class="bar-row">
+    <span class="yr">${d.k}${d.partial ? ' *' : ''}</span>
+    <span class="bar-track"><span class="bar-fill" style="width:${d.v / max * 100}%"></span></span>
+    <span class="bar-val">${d.v.toLocaleString()}</span>
+  </div>`).join('') +
+  `<div style="font-size:12px;color:var(--muted);margin-top:2px">* {{what's partial}}</div>`;
+
+$('themeBtn').addEventListener('click', () => {
+  const c = document.documentElement.getAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme', c === 'dark' ? 'light' : 'dark');
+});
+</script>
+</body>
+</html>
