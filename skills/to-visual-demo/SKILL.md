@@ -14,14 +14,15 @@ numbers, recommendation. Every word earns its place.
 
 ## Reading order
 
-The reader goes **verdict → recommendation → 3 tiles**, then often stops. Order the page for that,
-not for how you investigated: everything below is *evidence for a call already made*, never a
-build-up to it. The recommendation goes near the top.
+The reader goes **verdict → recommendation → [decision needed] → 3 tiles**, then often stops. Order
+the page for that, not for how you investigated: everything below is *evidence for a call already
+made*, never a build-up to it. The recommendation goes near the top.
 
 ## Non-negotiables
 
-1. **TLDR first screen.** Verdict banner + the recommendation + 3 stat tiles, above the fold. If
-   they read nothing else they still get the answer *and* what to do about it.
+1. **TLDR first screen.** Verdict banner + recommendation + any decision you need + 3 stat tiles,
+   above the fold. If they read nothing else they still get the answer, what to do about it, and
+   what you need from them.
 2. **Interactive, and honest.** Whatever the reader drives must be the real thing, and the page must
    say what it is. Free-text input always needs an unparseable-input state — never let it throw.
    Three shapes:
@@ -51,7 +52,15 @@ build-up to it. The recommendation goes near the top.
 6. **A recommendation, stated as a decision, near the top.** Bold the call. Include the "don't do X"
    if that's the real advice. Cost/tradeoff and reasoning go *under* it. If it needs the evidence
    below to make sense, it isn't written plainly enough yet.
-7. **Render it and look at it.** Non-negotiable — see the loop below.
+7. **A decision you need goes directly under the recommendation** — after, not before: the
+   recommendation is what makes the question answerable. Own block (`.decision`, amber) so it isn't
+   mistaken for a finding. Each ask carries the **question in one line**, **2-3 options with
+   consequences**, your **recommended default**, and **what's blocked** (or "nothing — proceeding on
+   the default"). More than three asks means you're offloading your job.
+
+   Ask only what needs a human: risk appetite, priority, access you can't grant, a fact not in the
+   code. **Anything you could determine yourself is not a decision — go determine it.**
+8. **Render it and look at it.** Non-negotiable — see the loop below.
 
 ## Build
 
@@ -62,12 +71,13 @@ Copy `template.html`, fill the marked slots, delete unused blocks. Palette is ba
 |---|---|---|
 | 1 | Verdict banner | the one sentence that changes the reader's mind |
 | 2 | **Recommendation** | the call, bolded, with cost/tradeoff — **above the fold, not at the end** |
-| 3 | 3 stat tiles | the 3 questions the reader actually has, answered |
-| 4 | Diagram | the path/sequence/branch, with the bad edge marked |
-| 5 | Live demo | real logic + mode toggle (the comparison card sits *inside* this grid) |
-| 6 | Comparison | signal-by-signal ✓/✗ |
-| 7 | Data | numbers with source + partial-data caveat |
-| 8 | Detail / diff | the code change, caveats, scope limits |
+| 3 | **Decision needed** *(if any)* | question + options + your default + what's blocked. Delete the block if nothing is genuinely blocked |
+| 4 | 3 stat tiles | the 3 questions the reader actually has, answered |
+| 5 | Diagram | the path/sequence/branch, with the bad edge marked |
+| 6 | Live demo | real logic + mode toggle (the comparison card sits *inside* this grid) |
+| 7 | Comparison | signal-by-signal ✓/✗ |
+| 8 | Data | numbers with source + partial-data caveat |
+| 9 | Detail / diff | the code change, caveats, scope limits |
 
 **Shape the demo to the finding.** The template's `sideA`/`sideB` are neutral on purpose —
 rename them. If one side is wrong, mark it ✗. If two sides merely *disagree* and the fix is to
@@ -107,6 +117,10 @@ Assert, don't squint: `getComputedStyle` in `browser_evaluate` catches what a sc
 Give the **absolute path** and 3-5 bullets on what's in it and what to click. State what you
 verified. Then the same verdict in one line of text — some readers never open the file.
 
+**Always restate a decision request in the message too**, with your default. A question that exists
+only inside the HTML is a question that may never be seen — and if you're blocked on it, you're
+blocked forever. Name what you'll do absent an answer, then do that.
+
 ## Common mistakes
 
 | Mistake | Fix |
@@ -121,5 +135,7 @@ verified. Then the same verdict in one line of text — some readers never open 
 | Rounding that hides a breach (`Math.round(0.33)`→"0% over") | Round toward the unfavorable side, or add a decimal |
 | Shipped without rendering | Run the loop; you have layout bugs |
 | Recommendation at the bottom | Move it under the verdict — the reader may stop before it |
+| Decision request buried at the end, or with no options/default | Own block under the recommendation; 2-3 options + your default |
+| Asking what you could have determined yourself | Go read the file — a needless question costs more than the work |
 | Diagram that decorates instead of explaining | One diagram, answering the central question, bad path marked |
 | `--` inside an HTML comment | Terminates it early and the rest leaks as visible page text |
