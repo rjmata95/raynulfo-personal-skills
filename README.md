@@ -171,6 +171,115 @@ None are tracked here. `.gitignore` blocks them as a backstop.
 
 See `.env.example` for the shape of every credential file — values documented, never real.
 
+## `jira-to-monday` — Jira Stories → Monday team board
+
+Reconciles active Jira Stories against the ChenMed SWAT Monday board by **configured
+teams** — not hardcoded to Titans/FT2. Shared board constants (column IDs, status maps)
+live in `config/jira-to-monday.board.json`; each dev leader supplies their own `teams[]`
+and optional RingCentral webhook in a local overlay.
+
+| Piece | Role |
+|---|---|
+| `skills/jira-to-monday/` | Sync workflow; config-driven teams |
+| `config/jira-to-monday.board.json` | Shared board 9074832017 constants |
+| `config/jira-to-monday.hector.example.json` | Titans + Feature Team 2 template |
+| `config/jira-to-monday.ray.example.json` | FT3 + FT4 template |
+
+```bash
+# Brain-only install (Ray) — do NOT link globally unless you want it everywhere
+ln -sfn "$PWD/skills/jira-to-monday" ~/projects/brain/.claude/skills/jira-to-monday
+cp config/jira-to-monday.ray.example.json ~/projects/brain/.claude/jira-to-monday.json
+```
+
+Peer install: copy `hector.example.json` to `~/.config/jira-to-monday/config.json`, put
+webhook in `config.local.json`. See `skills/jira-to-monday/references/setup.md`.
+
+## `anarlog` meeting capture → structured brain notes
+
+Local-first meeting capture ([anarlog](https://github.com/fastrepl/anarlog), MIT, formerly
+Hyprnote) feeding a Claude Code skill that structures each meeting into
+`~/projects/brain/meetings/`. Audio and transcription never leave the machine; anarlog's own
+summarization is intentionally left unconfigured — Claude Code does that work instead.
+
+**The problem it solves.** anarlog is local-first but BYO-everything: you configure capture,
+transcription, and (optionally) summarization yourself, and it hands you SQLite + a GUI export
+button. Nothing turns that into the kind of note — decisions with owners, action items with
+dates, links to the right project/1:1 — that's actually useful six months later.
+
+**What replaces it.**
+
+| Piece | Role |
+|---|---|
+| anarlog desktop app | Capture, on-device transcription, storage. Not this repo — a separate Mac install. |
+| `bin/anarlog-sync` | Exports one finished meeting's markdown (transcript) to the brain's raw inbox. |
+| `skills/meeting-notes/` | Digests the raw export into a structured, frontmatter'd note. |
+| `~/projects/brain/meetings/inbox-raw/` | Raw exports. Gitignored, transient. |
+| `~/projects/brain/meetings/` | Structured notes + `_index.md`. Version-controlled. |
+
+### One-time setup (do this yourself — GUI installer + permission dialogs)
+
+1. Download the Apple Silicon DMG from `anarlog.so/download` (requires macOS 15+), drag to
+   Applications, launch.
+2. Grant **microphone** and **system audio** when prompted. Skip calendar/accessibility unless
+   you want calendar-triggered auto-start.
+3. Settings → Developers → **Install** — copies the CLI to `~/.local/bin/anarlog`. Confirm
+   `~/.local/bin` is on PATH.
+4. Settings → AI Setup → **Transcription**: download a local on-device model (Apple Silicon
+   only). Leave **Intelligence** unconfigured — no provider, no API key. This is what keeps
+   audio and its transcript fully on-device and hands summarization to Claude Code instead.
+5. Link this repo's pieces:
+   ```bash
+   ln -sfn "$PWD/bin/anarlog-sync" ~/.local/bin/anarlog-sync
+   ln -sfn "$PWD/skills/meeting-notes" ~/.claude/skills/meeting-notes
+   ```
+
+### Capture SOP
+
+- **At your desk (Zoom/Meet, headphones on):** calendar-backed auto-start or mic-activity
+  detection both work out of the box once system-audio permission is granted. No manual step.
+- **Conference room (one mic, in-person, no system audio):** New Note → Record, manually. Two
+  things anarlog does **not** handle, so you have to:
+  - **Consent.** Florida is an all-party-consent state. anarlog has no consent feature at all —
+    say out loud at the start of the meeting that you're recording, before you hit Record.
+  - **Diarization.** A single shared mic gives materially worse speaker attribution than
+    Zoom/Meet's per-stream separation. Expect to spend a minute in anarlog's transcript editor
+    reassigning speaker labels, and expect the `meeting-notes` skill to flag (not silently guess
+    around) any attribution it finds inconsistent.
+
+### Usage
+
+```bash
+anarlog meetings list                                   # find the meeting id
+anarlog-sync <meeting-id>                                # export -> brain/meetings/inbox-raw/
+# then, in Claude Code (in ~/projects/brain):
+#   "run the meeting-notes skill on <meeting-id>.md"
+```
+
+Export is a manual, single command run after a meeting ends — no background poller, no
+launchd job, no webhook listener to keep alive. `anarlog-sync` takes an explicit meeting id
+rather than guessing "the latest meeting": anarlog's `meetings list --json` field names aren't
+published in its docs, so a wrong-schema guess there would risk silently exporting the wrong
+meeting. `meetings export ID --format markdown -o FILE` is fully documented, so that's the only
+CLI contract this script leans on.
+
+### Design decisions
+
+**Never read anarlog's SQLite directly.** anarlog's own docs say so explicitly — "Agents should
+use an Anarlog interface, not SQLite" / "Do not edit the app database directly." The CLI
+(`meetings export`) is the one sanctioned, stable surface; the DB schema is an implementation
+detail they've reserved the right to change.
+
+**Transcription and summarization are configured independently in anarlog**, and this setup
+deliberately uses only the first. Leaving Intelligence unset means no cloud provider ever sees
+meeting content, and avoids paying for/maintaining a second, redundant summarizer — Claude Code
+already does that work, with your own note-quality bar (owners, dates, cross-links) baked into
+`skills/meeting-notes/`.
+
+**The `meeting-notes` skill never calls anarlog.** It only reads whatever markdown file lands
+in `meetings/inbox-raw/`. That keeps the skill honest about a real limitation: it cannot verify
+anything against the live anarlog database, so if a transcript is garbled or misattributed, the
+skill's job is to say so in the note, not to paper over it.
+
 ## Promoting a skill
 
 When something here earns wider use: move the directory to the shared repo

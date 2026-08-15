@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# anarlog-sync — export one finished anarlog meeting into the brain's raw meetings inbox.
+#
+# Usage: anarlog-sync <meeting-id>
+#   Find the id with `anarlog meetings list` (or `anarlog meetings list --json`).
+#
+# Writes the raw markdown export to:
+#   ~/projects/brain/meetings/inbox-raw/<meeting-id>.md
+# From there, tell Claude Code to run the `meeting-notes` skill — it digests the raw export
+# into a structured note under ~/projects/brain/meetings/ and deletes the raw copy.
+#
+# Deliberately takes an explicit id rather than guessing "the latest meeting": anarlog's
+# `meetings list --json` field names aren't published in its docs, and a wrong guess there
+# would silently export the wrong meeting. `meetings export` itself is fully documented, so
+# that's the only anarlog CLI contract this script relies on.
+
+set -euo pipefail
+
+ANARLOG_BIN="${ANARLOG_BIN:-anarlog}"
+INBOX_DIR="${ANARLOG_SYNC_INBOX:-$HOME/projects/brain/meetings/inbox-raw}"
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: anarlog-sync <meeting-id>" >&2
+  echo "  find the id with: anarlog meetings list" >&2
+  exit 1
+fi
+
+meeting_id="$1"
+
+if ! command -v "$ANARLOG_BIN" >/dev/null 2>&1; then
+  echo "error: '$ANARLOG_BIN' not found on PATH." >&2
+  echo "  install anarlog (Settings > Developers > Install) and add ~/.local/bin to PATH." >&2
+  exit 1
+fi
+
+mkdir -p "$INBOX_DIR"
+out_file="$INBOX_DIR/${meeting_id}.md"
+
+"$ANARLOG_BIN" meetings export "$meeting_id" --format markdown -o "$out_file" --force
+
+echo "Exported meeting $meeting_id -> $out_file"
+echo "Next: ask Claude Code to run the meeting-notes skill on this file."
