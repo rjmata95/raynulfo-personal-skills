@@ -4,10 +4,17 @@
 # Usage: anarlog-sync <meeting-id>
 #   Find the id with `anarlog meetings list` (or `anarlog meetings list --json`).
 #
-# Writes the raw markdown export to:
-#   ~/projects/brain/meetings/inbox-raw/<meeting-id>.md
+# Writes the raw JSON export to:
+#   ~/projects/brain/meetings/inbox-raw/<meeting-id>.json
 # From there, tell Claude Code to run the `meeting-notes` skill — it digests the raw export
 # into a structured note under ~/projects/brain/meetings/ and deletes the raw copy.
+#
+# --format json, not markdown. anarlog's markdown export flattens the transcript into one
+# paragraph and drops per-channel speaker data entirely. The JSON export carries `participants`
+# (human_id -> display_name) and each transcript's `words` (per-word `channel`, 0 = your mic,
+# 1 = system audio) plus `speaker_hints` (channel -> human_id, from any speaker assignment you
+# made in the app). The meeting-notes skill needs all of that to label who said what — the
+# markdown export can't give it that, no matter how the skill is written.
 #
 # Deliberately takes an explicit id rather than guessing "the latest meeting": anarlog's
 # `meetings list --json` field names aren't published in its docs, and a wrong guess there
@@ -34,9 +41,9 @@ if ! command -v "$ANARLOG_BIN" >/dev/null 2>&1; then
 fi
 
 mkdir -p "$INBOX_DIR"
-out_file="$INBOX_DIR/${meeting_id}.md"
+out_file="$INBOX_DIR/${meeting_id}.json"
 
-"$ANARLOG_BIN" meetings export "$meeting_id" --format markdown -o "$out_file" --force
+"$ANARLOG_BIN" meetings export "$meeting_id" --format json -o "$out_file" --force
 
 echo "Exported meeting $meeting_id -> $out_file"
 echo "Next: ask Claude Code to run the meeting-notes skill on this file."

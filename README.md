@@ -211,15 +211,24 @@ dates, links to the right project/1:1 — that's actually useful six months late
 | Piece | Role |
 |---|---|
 | anarlog desktop app | Capture, on-device transcription, storage. Not this repo — a separate Mac install. |
-| `bin/anarlog-sync` | Exports one finished meeting's markdown (transcript) to the brain's raw inbox. |
+| `bin/anarlog-sync` | Exports one finished meeting's JSON (transcript + per-channel speaker data) to the brain's raw inbox. |
 | `skills/meeting-notes/` | Digests the raw export into a structured, frontmatter'd note. |
 | `~/projects/brain/meetings/inbox-raw/` | Raw exports. Gitignored, transient. |
 | `~/projects/brain/meetings/` | Structured notes + `_index.md`. Version-controlled. |
 
 ### One-time setup (do this yourself — GUI installer + permission dialogs)
 
-1. Download the Apple Silicon DMG from `anarlog.so/download` (requires macOS 15+), drag to
-   Applications, launch.
+1. Download the Apple Silicon DMG from the latest GitHub release, not the marketing download
+   page — same file, but the release also publishes a `.sha256` you can verify against:
+   ```bash
+   curl -sL -o anarlog-macos-aarch64.dmg \
+     "https://github.com/fastrepl/anarlog/releases/latest/download/anarlog-macos-aarch64.dmg"
+   curl -sL -o anarlog-macos-aarch64.dmg.sha256 \
+     "https://github.com/fastrepl/anarlog/releases/latest/download/anarlog-macos-aarch64.dmg.sha256"
+   shasum -a 256 -c anarlog-macos-aarch64.dmg.sha256
+   ```
+   Mount the DMG and drag Anarlog to Applications (or `hdiutil attach` + `cp -R` if scripting it),
+   then launch. Requires macOS 15+.
 2. Grant **microphone** and **system audio** when prompted. Skip calendar/accessibility unless
    you want calendar-triggered auto-start.
 3. Settings → Developers → **Install** — copies the CLI to `~/.local/bin/anarlog`. Confirm
@@ -241,10 +250,12 @@ dates, links to the right project/1:1 — that's actually useful six months late
   things anarlog does **not** handle, so you have to:
   - **Consent.** Florida is an all-party-consent state. anarlog has no consent feature at all —
     say out loud at the start of the meeting that you're recording, before you hit Record.
-  - **Diarization.** A single shared mic gives materially worse speaker attribution than
-    Zoom/Meet's per-stream separation. Expect to spend a minute in anarlog's transcript editor
-    reassigning speaker labels, and expect the `meeting-notes` skill to flag (not silently guess
-    around) any attribution it finds inconsistent.
+  - **Diarization.** anarlog only ever records two raw audio channels — your mic, and system
+    audio (everything else, mixed into one feed). On a 1:1 call that's a clean 1-to-1 speaker
+    split once you assign names in the app; on a call with 2+ other people, or a shared
+    conference-room mic where even you land on the same channel as everyone else, it collapses
+    to "you" vs. an undifferentiated "everyone else." That's a hardware/capture ceiling, not a
+    setting — see Design decisions below for what `meeting-notes` does and doesn't attempt here.
 
 ### Usage
 
@@ -252,15 +263,15 @@ dates, links to the right project/1:1 — that's actually useful six months late
 anarlog meetings list                                   # find the meeting id
 anarlog-sync <meeting-id>                                # export -> brain/meetings/inbox-raw/
 # then, in Claude Code (in ~/projects/brain):
-#   "run the meeting-notes skill on <meeting-id>.md"
+#   "run the meeting-notes skill on <meeting-id>.json"
 ```
 
 Export is a manual, single command run after a meeting ends — no background poller, no
 launchd job, no webhook listener to keep alive. `anarlog-sync` takes an explicit meeting id
 rather than guessing "the latest meeting": anarlog's `meetings list --json` field names aren't
 published in its docs, so a wrong-schema guess there would risk silently exporting the wrong
-meeting. `meetings export ID --format markdown -o FILE` is fully documented, so that's the only
-CLI contract this script leans on.
+meeting. `meetings export ID --format json -o FILE` is fully documented, so that's the only CLI
+contract this script leans on.
 
 ### Design decisions
 
@@ -275,10 +286,30 @@ meeting content, and avoids paying for/maintaining a second, redundant summarize
 already does that work, with your own note-quality bar (owners, dates, cross-links) baked into
 `skills/meeting-notes/`.
 
-**The `meeting-notes` skill never calls anarlog.** It only reads whatever markdown file lands
-in `meetings/inbox-raw/`. That keeps the skill honest about a real limitation: it cannot verify
+**The `meeting-notes` skill never calls anarlog.** It only reads whatever file lands in
+`meetings/inbox-raw/`. That keeps the skill honest about a real limitation: it cannot verify
 anything against the live anarlog database, so if a transcript is garbled or misattributed, the
 skill's job is to say so in the note, not to paper over it.
+
+**Export as JSON, not markdown — verified by testing, not assumed.** anarlog's markdown export
+flattens the transcript into one paragraph with zero speaker labels, full stop. The JSON export
+carries the actual diarization data: `participants[]` (`human_id` → `display_name`),
+`transcripts[0].words[]` (per-word `channel`), and `transcripts[0].speaker_hints[]` (channel →
+`human_id`, written when you assign a name in the app). None of that survives the markdown path.
+This only came to light by exporting a real test meeting both ways and diffing them — worth
+remembering before trusting an export format's docs description over its actual output.
+
+**The diarization ceiling is a capture-hardware fact, not a bug to route around.** anarlog
+records exactly two raw audio channels: your mic (channel 0) and system audio (channel 1,
+whatever's coming out of your speakers/headphones — a call's other side, a video, anything).
+Speaker assignment in the app just labels a whole channel with a name; it cannot separate
+multiple voices sharing one channel. So: a 1:1 desk call gets a fully reliable two-way split. A
+group call collapses to "you" vs. one undifferentiated "everyone else." A shared conference-room
+mic collapses further still, since even you share the room's single channel with everyone else.
+`meeting-notes` reconstructs and uses whatever channel split exists, but is written to say
+"the other participants" rather than invent which of three people said a given line — real
+per-voice diarization would require running something like pyannote against the raw audio
+itself, a materially bigger build this setup deliberately doesn't attempt.
 
 ## Promoting a skill
 

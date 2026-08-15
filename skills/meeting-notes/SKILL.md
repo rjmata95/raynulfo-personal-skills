@@ -5,35 +5,68 @@ description: Turn a raw anarlog meeting export sitting in the brain's meetings/i
 
 # Meeting notes
 
-Digests a raw anarlog markdown export (transcript, and optionally a memo/summary if the user
-configured one) into a structured, queryable note in the brain — the same raw-vs-digested split
-the brain already uses for `research-raw/` → `research/`.
+Digests a raw anarlog JSON export (transcript, per-channel speaker data, and optionally a
+memo/summary if the user configured one) into a structured, queryable note in the brain — the
+same raw-vs-digested split the brain already uses for `research-raw/` → `research/`.
 
 Upstream of this skill: `anarlog-sync <meeting-id>` (in `raynulfo-personal-skills/bin/`) exports
-a finished anarlog meeting to `~/projects/brain/meetings/inbox-raw/<meeting-id>.md`. This skill
+a finished anarlog meeting to `~/projects/brain/meetings/inbox-raw/<meeting-id>.json`. This skill
 picks up from there. It never talks to anarlog itself — no CLI calls, no MCP, no SQLite.
 
 ## Checklist
 
 1. Locate input
 2. Read the template
-3. Draft the structured note
-4. Link related notes
-5. Write, index, and clean up
+3. Reconstruct speaker-labeled transcript
+4. Draft the structured note
+5. Link related notes
+6. Write, index, and clean up
 
 ### 1. Locate input
 
-If not given a path, look in `~/projects/brain/meetings/inbox-raw/` for `.md` files. If there's
-more than one unprocessed file, ask which to do first rather than silently batching all of them.
+If not given a path, look in `~/projects/brain/meetings/inbox-raw/` for `.json` files. If
+there's more than one unprocessed file, ask which to do first rather than silently batching all
+of them.
 
 ### 2. Read the template
 
 Read `~/projects/brain/templates/meeting-note.md` first — it is the canonical shape (frontmatter
 fields, section order). Do not invent a different structure.
 
-### 3. Draft the structured note
+### 3. Reconstruct speaker-labeled transcript
 
-From the raw transcript/memo, produce:
+The export's flat `transcripts[0].text` has no speaker labels — build them yourself from three
+fields in the same object:
+
+- `participants[]` — `human_id` → `display_name` (skip entries with an empty display_name).
+- `transcripts[0].words[]` — each word has a `channel`: **0 is always the local mic (you), 1 is
+  always system audio** (everything coming out of the speakers/headphones — a Zoom/Meet call's
+  other side, a video, etc.). There are never more than these two raw channels.
+- `transcripts[0].speaker_hints[]` — entries where `type` is `user_speaker_assignment` carry a
+  JSON string in `value` like `{"human_id":"...","channel":0}`. Parse these to get a
+  channel → human_id map, then resolve to a display name via `participants[]`.
+
+Group consecutive same-channel words into turns and render as `<name>: <text>`, e.g.:
+```
+Ray: Hey, this is a quick test meeting...
+youtuber: The Garmin Circus, Garmin's long awaited answer...
+```
+If a channel has no `user_speaker_assignment` hint (the user never assigned anyone in the app),
+label it `Speaker 0` / `Speaker 1` — don't guess a real name from content.
+
+**The hard ceiling — say this in the Summary whenever it applies, don't paper over it:**
+channel 1 is a single mixed audio feed. On a call with exactly one other person, its label is
+reliable. On a call with two or more other people, everyone on "the other side" lands on the
+same channel, indistinguishable from each other — the note can say "the other participants"
+but must not attribute a specific line to a specific one of them without other evidence (they
+say their own name, or it's obvious from context who's who). Same logic for a shared
+conference-room mic, except there both you and everyone else are on the *same* single channel,
+so channel alone gives no separation at all — treat that case as unlabeled and rely on the
+existing diarization caveat below.
+
+### 4. Draft the structured note
+
+From the speaker-labeled transcript (and the memo/summary, if present), produce:
 
 - **Summary** — 3-6 sentences: what the meeting was actually about and how it landed.
 - **Decisions** — one bullet per decision, each with an owner. Omit the section if none were made.
@@ -47,20 +80,20 @@ From the raw transcript/memo, produce:
 
 Frontmatter: `date`, `title`, `type` (`1:1` | `standup` | `planning` | `incident-review` |
 `external` | `other`), `attendees`, `project` (slug, omit if not project-specific),
-`anarlog_meeting_id` (the raw filename's basename, before `.md`).
+`anarlog_meeting_id` (the raw filename's basename, before `.json`).
 
-**Diarization caveat:** a single conference-room mic with multiple in-person speakers produces
-less reliable speaker attribution than a Zoom/Meet capture where each stream is separated. If the
-transcript's speaker labels look inconsistent or contradictory, say so in the Summary instead of
-presenting a guessed owner/attribution as fact.
+**Diarization caveat:** beyond the channel ceiling in step 3, a shared conference-room mic (one
+channel, everyone on it) is the least reliable case of all — no channel split to lean on at all.
+If speaker attribution anywhere looks inconsistent or contradictory, say so in the Summary
+instead of presenting a guessed owner/attribution as fact.
 
-### 4. Link related notes
+### 5. Link related notes
 
 Only *link to* other files. Per the brain's append-only rules, never auto-append a pointer into
 `projects/<slug>/notes.md`, `people/ones/*.md`, or any other append-only file — if a cross-link
 belongs there too, tell the user and let them add it (or add it yourself only if they say to).
 
-### 5. Write, index, and clean up
+### 6. Write, index, and clean up
 
 - Save to `~/projects/brain/meetings/YYYY-MM-DD-<slug>.md` (date from the meeting itself, slug
   from the title).
