@@ -2,7 +2,7 @@
 alias: mysql-prod
 kind: mysql
 env: prod
-last_verified: 2026-08-07
+last_verified: 2026-08-12
 ---
 
 # mysql-prod — schema
@@ -63,6 +63,24 @@ project explicit columns and add `LIMIT`.
 and polypharmacy work. Note the `_bkp56` sibling — manual backup copies exist alongside live
 staging tables, so confirm which one is current before drawing conclusions.
 
+## `BI_RITS.EPD_MEDICATION_CLINICAL_SUMMARY_RECOMMENDATION`
+
+RITS AI-summary panel source. One row per order (`PAT_CATEGORY_ID`). Verified 2026-08-12: **615 rows, 615 distinct IDs, zero secondary indexes, no PK.**
+
+| Column | Type | Notes |
+|---|---|---|
+| `PAT_CATEGORY_ID` | bigint NOT NULL | Order key. Not unique-constrained. |
+| `PATIENT_ID` | bigint NOT NULL | |
+| `RECOMMENDATION_SUMMARY` | text NOT NULL | |
+| `EVIDENCE` | json NOT NULL | Array of `{value_name, value, value_type}`. SGLT2 `value` may be number, not string. |
+| `ACTIVE` | tinyint NOT NULL | All 1 on 2026-08-12. |
+| `CREATED_DATE` | timestamp NOT NULL | Original write. |
+| `CREATED_BY` | text NOT NULL | `snowflake_epd_engine` |
+| `UPDATED_DATE` | timestamp NOT NULL | **Full-refresh stamp** — every row shares the same value after a sync. |
+| `UPDATED_BY` | text NOT NULL | |
+
+Default database is `DASHBOARD_PROD`; always qualify `BI_RITS.…`. Snowflake `LANDING_SHARE.BI_RITS` is a lagging mysql-in copy of this table, not the same shape (see gotchas).
+
 ## Conventions
 
 - **Always `LIMIT` while exploring.** Several tables exceed 100 M rows.
@@ -100,8 +118,59 @@ ORDER BY table_rows DESC;
 dbq --schema mysql-prod.PAT_MEDICATIONS        # DESCRIBE + SHOW INDEX
 ```
 
+## The encounter-medication trio
+
+Verified 2026-08-13. These three answer most "who changed a patient's meds, and did anyone review
+them" questions. See `gotchas.md` for the four rocks in here — none of them is obvious from DDL.
+
+### `PAT_MEDICATIONS` — the patient medication list (~76.5 M rows)
+
+The shared row store. **Not exclusively legacy-owned any more**: NextGen's
+`patient-medication-data-relay` upserts into it as `NEXTGEN_SERVICE`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `MEDICATION_ID` | bigint PK | auto-increment — use it for recency, there is no date index |
+| `PATIENT_ID` | bigint | indexed |
+| `SOURCE` | varchar(10) NOT NULL, default `INTERNAL` | **the writer discriminator.** `EXTERNAL` / `EXT(MODIF)` / `EXT(DEL)` = NextGen relay; `INTERNAL` = in-house dispensary (ASMeds) |
+| `CREATED_BY` / `UPDATED_BY` | varchar | `NEXTGEN_SERVICE` for relay writes, an individual username for dispensary writes |
+| `CREATED_DATE` / `UPDATED_DATE` | datetime | **not indexed** |
+| `ACTIVE` | tinyint(1), default 1 | discontinue sets 0 alongside `INACTIVE_USER_ID`, `INACTIVE_REASON`, `INACTIVE_DATE` |
+| `ENCOUNTER_RCOPIAID` | bigint | indexed — DrFirst Rcopia encounter key |
+| `MED_NAME`, `MED_NAME_ID` | varchar / int | both indexed |
+| `LEGACY_MEDICATION_ID`, `MED_ID`, `PRESCRIPTION_GUID` | | cross-system identity |
+
+Read by `usp_DrFirst_Medication_PreviewSignOff_Get` — a name that does **not** mean the data came
+from DrFirst. Written by `usp_PatMedications_Upsert`. The real DrFirst ETL staging table is the
+separate `STAGE_PATIENT_MEDICATION_DRFIRST`.
+
+### `NB_MEDICATION_STATE` — per-medication adherence, **per progress note** (~93 M rows)
+
+`(NOTE_ID, MEDICATION_ID, MED_STATE_CODE, MED_STATE, CREATED_BY, CREATION_DATE, UPDATED_BY,
+UPDATION_DATE)`, PK `MED_STATE_ID`. **There is no `PATIENT_ID`** — a row cannot exist outside a note,
+so every question here is encounter-scoped. `MED_STATE` holds the description string; the eight live
+values are `Taking As Directed`, `Taking As Needed`, `Taking Inconsistently`, `Not Taking`, `On Hold`,
+`Discontinued`, `Newly Prescribed`, `Patient Did Not Bring`. Codes resolve via
+`NB_MEDICATION_STATE_LK` (`MED_STATE_CODE` → `MED_STATE_DESC`).
+
+Indexes: `IDX_MEDICATION_ID`, `IDX_NOTE_ID`, and `MED_CREATION_index (MED_STATE, CREATION_DATE)` —
+status-first, so a bare date predicate does not use it.
+
+Still receiving ~40 K rows/day from legacy MyNotes as of 2026-08-13. Also read by the NextGen RCM
+claim ETL (`visit-claims-cmd/scripts/hedis_mr.sql`) to emit HEDIS CPT-II codes, and exported through
+`usp_CCDA_{PN,CCD}_PatientMedications_Get`.
+
+### `VENDOR_CHENMED_MAPPING_LK` — vendor enrolment lookup (~33.7 K rows)
+
+The "is this practice ePrescribe-enabled" gate. `EXTERNAL_ID` joins to a practice/office/user id
+depending on `ENTITY`. See `gotchas.md` for the `ENTITY` vs `ENTITY_TYPE` split. Index
+`IX_VENDOR_CHENMED_MAPPING_LK1 (EXTERNAL_ID, ACTIVE, ENTITY)` — note `ENTITY_TYPE` is *not* in it, so
+the C# gate's predicate is unindexed while the SP's is.
+
+Related: `NB_NOTE_HDR.MEDICATION_REVIEW_STATUS` and `.OTC_MEDICATION` are the note-level attestation
+flags, written only via `usp_NbNoteHdr_MedicationReviewStatus_Update` / legacy MyNotes.
+
 ## Not yet documented
 
-Column-level detail for the tables that matter most (`PAT_MEDICATIONS`,
-`STAGE_PATIENT_MEDICATION_DRFIRST`, `LAB_RESULT_DETAIL`) is not filled in. Add it with
-`dbq --schema mysql-prod.<TABLE>` as you work with each one.
+Column-level detail for `STAGE_PATIENT_MEDICATION_DRFIRST` and `LAB_RESULT_DETAIL` is not filled in.
+Add it with `dbq --schema mysql-prod.<TABLE>` as you work with each one.

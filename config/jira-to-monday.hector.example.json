@@ -1,0 +1,24 @@
+{
+  "_comment": "Example user config — Hector Reyes Pupo (Titans + Feature Team 2). Copy to ~/.config/jira-to-monday/config.json or project .claude/jira-to-monday.json",
+  "extends": "board",
+  "owner": "Hector Reyes Pupo",
+  "teams": [
+    {
+      "id": "titans",
+      "label": "Team 1 (Titans)",
+      "jiraTeamName": "Titans",
+      "mondayDropdownId": 2,
+      "mondayDropdownLabel": "A) Team 1"
+    },
+    {
+      "id": "ft2",
+      "label": "Team 2 (Feature Team 2)",
+      "jiraTeamName": "Feature Team 2 ",
+      "mondayDropdownId": 4,
+      "mondayDropdownLabel": "B) Team 2"
+    }
+  ],
+  "notifications": {
+    "ringcentralWebhook": "SET_IN_LOCAL_OVERLAY"
+  }
+}

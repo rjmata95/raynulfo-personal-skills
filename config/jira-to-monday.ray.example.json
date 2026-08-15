@@ -1,0 +1,24 @@
+{
+  "_comment": "Example user config — Raynulfo (FT3 + FT4). mondayDropdownId values are TBD — discover via Monday get_board_info on dropdown_mkqqd7.",
+  "extends": "board",
+  "owner": "Raynulfo",
+  "teams": [
+    {
+      "id": "ft3",
+      "label": "Feature Team 3",
+      "jiraTeamName": "FT3",
+      "mondayDropdownId": 5,
+      "mondayDropdownLabel": "C) Team 3"
+    },
+    {
+      "id": "ft4",
+      "label": "Feature Team 4",
+      "jiraTeamName": "FT4",
+      "mondayDropdownId": 3,
+      "mondayDropdownLabel": "D) Team 4"
+    }
+  ],
+  "notifications": {
+    "ringcentralWebhook": null
+  }
+}

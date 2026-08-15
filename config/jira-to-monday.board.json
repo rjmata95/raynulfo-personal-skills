@@ -1,0 +1,60 @@
+{
+  "_comment": "Shared ChenMed SWAT board defaults. Same for every dev leader on board 9074832017. No secrets.",
+  "jira": {
+    "baseUrl": "https://jira.chenmed.com",
+    "projectKey": "DSC",
+    "investmentCategoryField": "customfield_11900",
+    "epicLinkJqlField": "Epic Link",
+    "activeStatuses": [
+      "SELECTED FOR DEVELOPMENT",
+      "In Progress",
+      "In Development",
+      "Ready for QA",
+      "In QA"
+    ],
+    "doneStatus": "Done",
+    "excludeLabel": "no-review",
+    "issueType": "Story",
+    "jqlFields": "summary,status,assignee,team,duedate,customfield_11900,labels"
+  },
+  "monday": {
+    "boardId": "9074832017",
+    "boardName": "SWAT and Feature Teams",
+    "subitemBoardId": "9074832082",
+    "defaultGroupId": "topics",
+    "columns": {
+      "teamAssignment": "dropdown_mkqqd7",
+      "jiraLink": "link_mm0gw39j",
+      "subitemJiraLink": "link_mkwtg1m",
+      "status": "status",
+      "issueType": "status0",
+      "releaseDate": "date_mkzzpv8p",
+      "subitemReleaseDate": "date_1"
+    }
+  },
+  "statusMapping": {
+    "In Progress": { "parent": "In DEV", "subitem": "Working on it" },
+    "In Development": { "parent": "In DEV", "subitem": "Working on it" },
+    "Selected for Development": { "parent": "Reqs Done", "subitem": "Not started" },
+    "Ready for QA": { "parent": "Ready For QA", "subitem": "Ready for QA" },
+    "In QA": { "parent": "In QA", "subitem": "QA" },
+    "Done": { "parent": "Ready for Prod", "subitem": "Ready for prod", "updateOnly": true }
+  },
+  "investmentCategory": {
+    "required": true,
+    "prefixes": {
+      "Tech Debt": "[Tech Debt] ",
+      "Feature": "[Feature] ",
+      "SWAT": "[SWAT] "
+    },
+    "issueTypes": {
+      "Feature": "New Feature",
+      "Tech Debt": "Tech Debt",
+      "SWAT": "SWAT"
+    }
+  },
+  "releaseDate": {
+    "rule": "jiraDueDatePlusOneBusinessDay",
+    "skipWeekends": true
+  }
+}
