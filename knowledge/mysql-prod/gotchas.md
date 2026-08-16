@@ -21,6 +21,24 @@ Entry format:
 
 ---
 
+## 2026-08-15 — `SUBJECTIVE_TRAN` has no questionnaire-name column; MiniCog/FullCog went quiet in 2026
+
+**Symptom:** Inventory and the C# entity `SubjectiveTran.QuestionaireName` look like a column you
+can `GROUP BY`. It is not on the table. Also: MiniCog and FullCog still have routes and tiles in
+MyNotes, so they look live.
+
+**Cause:** the name lives on `CLINICAL_TERMINOLOGY.TERMINOLOGY`, joined by `CT_ID`. Cognitive
+instruments forked: `CT_ID` 19 (Dementia/Creyos) starts 2025-07-18 and is the 2026 writer;
+`CT_ID` 12/13 (FullCog/MiniCog) have 2026 rows only in January (37 and 73), then zero.
+Bleeding and Bruising (`CT_ID` 9) last assessed 2024-12-18 — no 2025–2026 rows. HOS (`CT_ID` 15)
+has **zero** rows in `SUBJECTIVE_TRAN`.
+
+**Handling:** always join `CLINICAL_TERMINOLOGY`. For "is this screening live?" use
+`MAX(ASSESSED_DATE)` / year buckets on `CT_ID`, not the presence of an Angular route. Do not
+treat `MIN(ASSESSED_DATE) = 2024-01-01` as go-live — that is a warehouse floor for several CT_IDs.
+
+---
+
 ## 2026-08-13 — `NB_MEDICATION_STATE.CREATION_DATE` is the note's VISIT_DATE, not the write time
 
 **Symptom:** `MAX(CREATION_DATE)` values are all exactly midnight (`2026-08-13 00:00:00`), and a

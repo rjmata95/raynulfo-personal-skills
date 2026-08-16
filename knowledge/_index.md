@@ -15,7 +15,7 @@ What each alias has documented, and how fresh it is. **Read the relevant
 | Alias | Kind | Env | Schema | Gotchas | Last verified |
 |---|---|---|---|---|---|
 | `encounter` | mongo | prod | **collection** | yes | 2026-08-07 |
-| `mysql-prod` | mysql | prod | **table sizes** + `BI_RITS` reco + encounter-medication trio (`PAT_MEDICATIONS`, `NB_MEDICATION_STATE`, `VENDOR_CHENMED_MAPPING_LK`) | yes | 2026-08-13 |
+| `mysql-prod` | mysql | prod | **table sizes** + `BI_RITS` reco + encounter-medication trio + screening `SUBJECTIVE_TRAN`/`CLINICAL_TERMINOLOGY` | yes | 2026-08-15 |
 | `medication` | mongo | prod | databases | yes | 2026-08-07 |
 | `patient` | mongo | prod | databases | yes | 2026-08-07 |
 | `practice-mgmt` | mongo | prod | databases | yes | 2026-08-07 |

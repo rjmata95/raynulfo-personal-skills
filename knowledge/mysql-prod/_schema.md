@@ -2,7 +2,7 @@
 alias: mysql-prod
 kind: mysql
 env: prod
-last_verified: 2026-08-12
+last_verified: 2026-08-15
 ---
 
 # mysql-prod — schema
@@ -169,6 +169,54 @@ the C# gate's predicate is unindexed while the SP's is.
 
 Related: `NB_NOTE_HDR.MEDICATION_REVIEW_STATUS` and `.OTC_MEDICATION` are the note-level attestation
 flags, written only via `usp_NbNoteHdr_MedicationReviewStatus_Update` / legacy MyNotes.
+
+## Screening writes — `SUBJECTIVE_TRAN` + `CLINICAL_TERMINOLOGY`
+
+Verified 2026-08-15. MyNotes screenings do **not** store a `QuestionaireName` column. C# entity
+`SubjectiveTran.QuestionaireName` is a SQL alias of `CLINICAL_TERMINOLOGY.TERMINOLOGY` via `CT_ID`.
+
+### `CLINICAL_TERMINOLOGY` — 18 rows, PK `CT_ID`
+
+Lookup table. Index `IDX_TERM (TERMINOLOGY, IS_ACTIVE)`. Screening names used by MyNotes/CarePro:
+
+| CT_ID | TERMINOLOGY |
+|---|---|
+| 7 | Depression Screening |
+| 8 | Alcohol Screening |
+| 9 | Bleeding and Bruising |
+| 10 | COPD Screening |
+| 11 | Neuropathy Screening |
+| 12 | FullCog Screening |
+| 13 | MiniCog Screening |
+| 14 | ECOG Screening |
+| 15 | HOS Screening |
+| 16 | GDS5 Screening |
+| 17 | CHF Screening |
+| 19 | Dementia Screening |
+| 20 | Ulcer Screening |
+
+Also on this table (not MyNotes screening tiles): 2 PAIN ASSESSMENT, 3 MRP, 4 CDC_EyeExam, 5 CRC, 6 Advance Directives. There is **no IADL** terminology row.
+
+### `SUBJECTIVE_TRAN` — ~28 M rows, ~4 GB
+
+PK `(ID, ASSESSED_DATE)`. Join screenings on `CT_ID` (indexed, ~113 cardinality). `VALUE` /
+`VALUE_DESCRIPTION` hold status, score, and answers; status rows are discriminated in
+`mynotes-api` by `ValueDescription` strings such as `depression screening status` (see
+`QuestionnaireService`). `IS_ACTIVE` tinyint default 1.
+
+Sibling copies exist (`SUBJECTIVE_TRAN_OLD`, `SUBJECTIVE_TRAN_BKP_202512`, `STAGING_DB.SUBJECTIVE_TRAN`).
+Query `DASHBOARD_PROD.SUBJECTIVE_TRAN` unless you are chasing a restore.
+
+```sql
+SELECT st.CT_ID, ct.TERMINOLOGY, COUNT(*) n, MAX(st.ASSESSED_DATE) last_assessed
+FROM SUBJECTIVE_TRAN st
+JOIN CLINICAL_TERMINOLOGY ct ON ct.CT_ID = st.CT_ID
+WHERE st.CT_ID IN (7,8,9,10,11,12,13,14,16,17,19,20)
+GROUP BY st.CT_ID, ct.TERMINOLOGY;
+```
+
+`MIN(ASSESSED_DATE)` for several CT_IDs is `2024-01-01` — treat as a warehouse/partition floor, not
+instrument go-live. Neuropathy goes back to 2018; Ulcer starts 2026-01-01.
 
 ## Not yet documented
 
