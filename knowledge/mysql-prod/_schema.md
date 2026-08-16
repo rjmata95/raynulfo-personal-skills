@@ -148,10 +148,9 @@ separate `STAGE_PATIENT_MEDICATION_DRFIRST`.
 
 `(NOTE_ID, MEDICATION_ID, MED_STATE_CODE, MED_STATE, CREATED_BY, CREATION_DATE, UPDATED_BY,
 UPDATION_DATE)`, PK `MED_STATE_ID`. **There is no `PATIENT_ID`** — a row cannot exist outside a note,
-so every question here is encounter-scoped. `MED_STATE` holds the description string; the eight live
-values are `Taking As Directed`, `Taking As Needed`, `Taking Inconsistently`, `Not Taking`, `On Hold`,
-`Discontinued`, `Newly Prescribed`, `Patient Did Not Bring`. Codes resolve via
-`NB_MEDICATION_STATE_LK` (`MED_STATE_CODE` → `MED_STATE_DESC`).
+so every question here is encounter-scoped. `MED_STATE` holds the description string. Writes are
+inline SQL (no SP); lookup is `NB_MEDICATION_STATE_LK.MED_STATE_DESC = @StatusCode`, never by
+numeric `MEDICATION_STATE_LK_ID`.
 
 Indexes: `IDX_MEDICATION_ID`, `IDX_NOTE_ID`, and `MED_CREATION_index (MED_STATE, CREATION_DATE)` —
 status-first, so a bare date predicate does not use it.
@@ -159,6 +158,26 @@ status-first, so a bare date predicate does not use it.
 Still receiving ~40 K rows/day from legacy MyNotes as of 2026-08-13. Also read by the NextGen RCM
 claim ETL (`visit-claims-cmd/scripts/hedis_mr.sql`) to emit HEDIS CPT-II codes, and exported through
 `usp_CCDA_{PN,CCD}_PatientMedications_Get`.
+
+### `NB_MEDICATION_STATE_LK` — 8 rows, PK gap at id 5 (verified 2026-08-15)
+
+No unique on `MED_STATE_CODE`. Checked-in DDL seeds only `'06','Patient Did Not Bring'`; prod has
+the full set. **Id `5` is missing** (deleted row). `07` is `'Taking as needed'` — JS says
+`'Taking As Needed'` (benign under MySQL ci collation).
+
+| ID | CODE | MED_STATE_DESC |
+|---|---|---|
+| 1 | 00 | Taking As Directed |
+| 2 | 01 | Taking Inconsistently |
+| 3 | 02 | Not Taking |
+| 4 | 03 | On Hold |
+| 6 | 04 | Discontinued |
+| 7 | 05 | Newly Prescribed |
+| 8 | 06 | Patient Did Not Bring |
+| 9 | 07 | Taking as needed |
+
+`NB_NOTE_HDR.OTC_MEDICATION` is `bit(1) DEFAULT 0` **nullable** (NULL/0/1). `MEDICATION_REVIEW_STATUS`
+is `bit(1) NOT NULL DEFAULT 0`. Review-status SP updates those three: status, `UPDATED_BY`, `UPDATION_TIME`.
 
 ### `VENDOR_CHENMED_MAPPING_LK` — vendor enrolment lookup (~33.7 K rows)
 

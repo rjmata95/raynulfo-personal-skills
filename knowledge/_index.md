@@ -16,7 +16,7 @@ What each alias has documented, and how fresh it is. **Read the relevant
 |---|---|---|---|---|---|
 | `encounter` | mongo | prod | **collection** | yes | 2026-08-07 |
 | `mysql-prod` | mysql | prod | **table sizes** + `BI_RITS` reco + encounter-medication trio + screening `SUBJECTIVE_TRAN`/`CLINICAL_TERMINOLOGY` | yes | 2026-08-15 |
-| `medication` | mongo | prod | databases | yes | 2026-08-07 |
+| `medication` | mongo | prod | databases + `patient-medications` | yes | 2026-08-15 |
 | `patient` | mongo | prod | databases | yes | 2026-08-07 |
 | `practice-mgmt` | mongo | prod | databases | yes | 2026-08-07 |
 | `tenant-mgmt` | mongo | prod | databases | yes | 2026-08-07 |

@@ -21,6 +21,14 @@ Entry format:
 
 ---
 
+## 2026-08-15 — `patient-medications` has no MyNotes `MEDICATION_ID`
+
+**Symptom:** looking for a GraphQL or Mongo field to join NextGen list rows to `NB_MEDICATION_STATE.MEDICATION_ID` returns nothing named legacy/MEDICATION_ID.
+
+**Cause:** the read model identity is `patientMedicationId` (UUID). `fdbMedId` is a drug catalog id. An event field `patientMedicationLegacyId` is accepted on import and never persisted. Sampled 200 prod docs: those legacy keys are absent.
+
+**Handling:** do not invent a join via `fdbMedId` (collides when a patient has two rows of the same drug). Treat the note-state join as an open design decision. Schema map is in `_schema.md`.
+
 ## 2026-08-07 — this alias is a cluster; no database matches the alias name
 
 **Symptom:** `dbq medication 'db.getCollectionNames()'` returns an empty list with `ok: 1` and no

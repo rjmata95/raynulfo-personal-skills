@@ -2,7 +2,7 @@
 alias: medication
 kind: mongo
 env: prod
-last_verified: 2026-08-07
+last_verified: 2026-08-15
 ---
 
 # medication — schema
@@ -65,9 +65,23 @@ why an external system did or did not receive something.
 - **Writes go through GraphQL**, never here. This cluster is read-only in `dbq`; the
   `data-fix-scripts` skill owns mutations via GraphQL so Phoenix emits proper domain events.
 
+## `patient-medication-query.patient-medications`
+
+One document = one patient-medication instance (not a drug catalog row). Sampled 200 docs 2026-08-15.
+
+**No legacy MyNotes id.** Fields named `patientMedicationLegacyId` / `legacyMedicationId` / `MEDICATION_ID` are **absent**. Identity is `patientMedicationId` (string UUID, 100%). `fdbMedId` / `medicationId` are drug-catalog ids (72%) — shared across patients, not instance keys.
+
+Join to `NB_MEDICATION_STATE.MEDICATION_ID` (legacy `long`) is **not recoverable from this collection**. GraphQL also does not expose a comment field; Mongo has `additionalPatientNotes` / `additionalPharmacistNotes` (72%) which are not in the list schema as `comment`.
+
+Always-present (100%): `tenantId`, `patientId`, `patientMedicationId`, `active`, `medicationStopDate`, `reasonToStop`, `reasonToStopComment`. Remaining clinical fields (`sig`, `quantity`, `medicationName`, `fdbMedId`, `deleted`, dates, dose/route) sit at **72%** — a thinner document shape exists alongside the full one.
+
+`deleted` is a hard tombstone (query layer always filters `deleted: false`). `active: false` is the stop/inactive flag.
+
+Indexes: uniqueness `(tenantId, patientId, patientMedicationId)`; list filters are tenant+patient+deleted+active prefixed.
+
 ## Not yet documented
 
-Collection-level field maps are not filled in yet. Derive one and add it here:
+Other collections in this cluster are still unmapped. Derive one and add it here:
 
 ```bash
 DBQ_DB=patient-prescription-query dbq --collections medication
