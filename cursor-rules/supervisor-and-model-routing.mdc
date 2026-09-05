@@ -1,0 +1,56 @@
+---
+description: Supervisor defaults, Fast-first model routing, collaborative worktrees
+alwaysApply: true
+---
+
+# Supervisor Mode & Subagent Model Routing
+
+## Default role by task size
+| Size | Signals | Main agent role |
+|------|---------|-----------------|
+| **Small** | One file, one fix, one command, obvious path | Hands-on is fine |
+| **Medium** | Multi-file, several steps, parallel work possible | **Supervisor** — delegate |
+| **Large** | Cross-cutting change, refactor, or independent workstreams | **Supervisor + QC** — orchestrate subagents and verify integration |
+
+These defaults apply unless the user explicitly invokes a different workflow.
+
+- **Investigation / answer:** exploration subagents as needed; return evidence; no automatic reviewer.
+- **Implementation:** dispatch implementers for independent tasks, then exhaustive reviewers. Surface reviewer findings only when load-bearing; otherwise dispatch automatic fix → re-review loops. Quality and time-saving is of the essence.
+
+For medium or large work, parallelize only independent tasks. The main agent owns synthesis, user decisions, and proportionate final verification. Hands-on only for trivial glue, unblockers, or integration subagents cannot do.
+
+## Subagent model tiers
+
+Use explicit `model` on Task/subagent launches.
+
+| Tier | Models (slug) | Use for |
+|------|---------------|---------|
+| **Fast** | Composer (`composer-2.5-fast`) (preferred), GPT Luna (`gpt-5.6-luna-medium`) | **Default** — mechanical work, routine implementation, narrow exploration, routine review |
+| **Medium** | GPT Terra (`gpt-5.6-terra-medium`), Sonnet (`claude-sonnet-5-thinking-high`) | **Step up** — domain reasoning, cross-file logic, ambiguous contracts |
+| **Premium** | Grok (`cursor-grok-4.6-high`) (preferred), Opus (`claude-opus-5-thinking-high`), GPT Sol (`gpt-5.6-sol-high`) | Security, architecture, hard debugging, contract ambiguity, conflicting-evidence adjudication |
+
+## Routing rules
+
+1. **Default → Fast** for implementation, exploration, and routine review.
+2. **Step up → Medium** when the task needs domain reasoning, cross-file logic, or business-context judgment Fast cannot carry.
+3. **Premium** only for the Premium criteria above — not for routine implementation.
+4. **Investigation / answer →** no automatic reviewer.
+5. **After implementation review →** surface findings; ask before another implementer or re-review.
+6. **Main agent stays on inherit** unless the user picks a model.
+7. **If unsure, stay Fast.** Upgrade one tier only when a step-up criterion is met.
+
+## Examples
+
+- Fix a typo in one file → main agent hands-on; no subagent.
+- Everyday implementation → Fast implementer, Fast reviewer.
+- Multi-file change with domain rules → Medium implementer, Fast or Medium reviewer.
+- Investigation → Fast exploration subagent; Medium only when domain reasoning is required.
+- "Where is X defined?" → Fast exploration subagent.
+- Root-cause a race across services → Premium analysis; Medium for the fix.
+- Explicitly invoked workflow → follow that workflow instead of these defaults.
+
+## Worktrees
+
+**Collaborative repositories** (shared remote, team use): prefer a worktree at `<repo-root>/.worktrees/<slug>/` over checking out a branch in the main clone.
+
+**Local-only or personal repositories:** ask the user — no default.
