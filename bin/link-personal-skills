@@ -1,0 +1,551 @@
+#!/usr/bin/env bash
+# link-personal-skills — interactive symlink installer for raynulfo-personal-skills.
+#
+# Links cursor rules, global CLAUDE.md, skills, and bin/ CLIs from this repo onto
+# the machine. Git stays authoritative; run again any time after pulling changes.
+#
+# bash 3.2 compatible (macOS system bash).
+
+set -uo pipefail
+
+PROG="link-personal-skills"
+
+# Resolve repo root even when invoked via ~/.local/bin symlink.
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do
+  _link=$(readlink "$_self")
+  case "$_link" in
+    /*) _self="$_link" ;;
+    *)  _self="$(cd -P "$(dirname "$_self")" && pwd)/$_link" ;;
+  esac
+done
+BIN_DIR="$(cd -P "$(dirname "$_self")" && pwd)"
+REPO_ROOT="$(cd -P "$BIN_DIR/.." && pwd)"
+
+BRAIN_SKILLS_DIR="${BRAIN_SKILLS_DIR:-$HOME/projects/brain/.claude/skills}"
+
+CURSOR_RULES=(
+  communication-style.mdc
+  supervisor-and-model-routing.mdc
+)
+
+SKILLS=(
+  meeting-notes
+  pr-review-migration-program
+  querying-databases
+  querying-new-relic
+  querying-snowflake
+  servicenow-tickets
+  setting-up-dbq
+  setting-up-nrq
+  setting-up-snq
+  setting-up-snowflake
+  jira-to-monday
+  to-visual-demo
+)
+
+BINS=(
+  anarlog-sync
+  dbq
+  dbq-doctor
+  dbq-init
+  nrq
+  nrq-doctor
+  nrq-init
+  snq
+  snq-auth
+  snq-doctor
+)
+
+PICK_LIST=()
+PICK_RESULT=()
+
+usage() {
+  cat <<EOF
+Usage: $PROG [options]
+
+Interactive symlink installer for raynulfo-personal-skills.
+Requires a TTY unless you pass explicit selections.
+
+Options:
+  -h, --help              Show this help
+  -n, --dry-run           Print actions without changing anything
+  --cursor-rules LIST     Comma-separated rule basenames, or "all"
+  --claude-global         Link claude-global/CLAUDE.md -> ~/.claude/CLAUDE.md
+  --skills LIST           Comma-separated skill names, or "all"
+  --skill-target TARGET   Repeatable: claude, cursor, brain (default: claude)
+  --bins LIST             Comma-separated bin names, or "all"
+
+Examples:
+  $PROG
+  $PROG --claude-global --cursor-rules all
+  $PROG --skills querying-databases,setting-up-dbq --skill-target claude --bins dbq,dbq-doctor
+EOF
+}
+
+die() {
+  echo "$PROG: $*" >&2
+  exit 1
+}
+
+need_tty() {
+  [ -t 0 ] && [ -t 1 ]
+}
+
+prompt_yes() {
+  local prompt="$1"
+  local default="${2:-n}"
+  local hint reply
+
+  if [ "$default" = "y" ]; then
+    hint="Y/n"
+  else
+    hint="y/N"
+  fi
+
+  while true; do
+    printf "%s [%s] " "$prompt" "$hint"
+    read -r reply
+    if [ -z "$reply" ]; then
+      reply="$default"
+    fi
+    case "$reply" in
+      y|Y|yes|YES) return 0 ;;
+      n|N|no|NO)   return 1 ;;
+      *) echo "  Enter y or n." ;;
+    esac
+  done
+}
+
+print_numbered_list() {
+  local title="$1"
+  shift
+  local i=1
+  local item
+
+  echo "$title"
+  for item in "$@"; do
+    printf "  %2d) %s\n" "$i" "$item"
+    i=$((i + 1))
+  done
+  printf "   a) all\n"
+}
+
+parse_selection() {
+  local reply="$1"
+  local count="$2"
+  local i item part old_ifs
+
+  reply=$(printf '%s' "$reply" | tr -d '[:space:]')
+  if [ -z "$reply" ]; then
+    return 1
+  fi
+  if [ "$reply" = "a" ] || [ "$reply" = "A" ] || [ "$reply" = "all" ]; then
+    SELECTED_INDICES=""
+    i=1
+    while [ "$i" -le "$count" ]; do
+      SELECTED_INDICES="$SELECTED_INDICES $i"
+      i=$((i + 1))
+    done
+    return 0
+  fi
+
+  SELECTED_INDICES=""
+  reply="${reply#,}"
+  reply="${reply%,}"
+  old_ifs="$IFS"
+  IFS=','
+  for part in $reply; do
+    item="$part"
+    case "$item" in
+      ''|*[!0-9]*)
+        IFS="$old_ifs"
+        die "invalid selection: $item"
+        ;;
+    esac
+    if [ "$item" -lt 1 ] || [ "$item" -gt "$count" ]; then
+      IFS="$old_ifs"
+      die "selection out of range: $item (1-$count)"
+    fi
+    SELECTED_INDICES="$SELECTED_INDICES $item"
+  done
+  IFS="$old_ifs"
+  return 0
+}
+
+# PICK_LIST / PICK_RESULT hold the current interactive menu (bash 3.2 has no namerefs).
+pick_from_list() {
+  local prompt="$1"
+  shift
+  local count="$#"
+  local reply i
+
+  if [ "$count" -eq 0 ]; then
+    die "internal error: empty pick list"
+  fi
+
+  PICK_LIST=("$@")
+  print_numbered_list "$prompt" "${PICK_LIST[@]}"
+  while true; do
+    printf "Selection (numbers comma-separated, or a): "
+    read -r reply
+    if parse_selection "$reply" "$count"; then
+      break
+    fi
+    echo "  Pick at least one item, or press Ctrl-C to abort."
+  done
+
+  PICK_RESULT=()
+  for i in $SELECTED_INDICES; do
+    PICK_RESULT+=("${PICK_LIST[$((i - 1))]}")
+  done
+}
+
+list_from_csv_or_all() {
+  local csv="$1"
+  local array_name="$2"
+  local item part old_ifs found candidate
+  local items
+
+  if [ "$csv" = "all" ]; then
+    eval "printf '%s\\n' \"\${${array_name}[@]}\""
+    return 0
+  fi
+
+  csv="${csv#,}"
+  csv="${csv%,}"
+  old_ifs="$IFS"
+  IFS=','
+  for part in $csv; do
+    item="$part"
+    eval "items=(\"\${${array_name}[@]}\")"
+    found=0
+    for candidate in "${items[@]}"; do
+      if [ "$candidate" = "$item" ]; then
+        printf '%s\n' "$candidate"
+        found=1
+        break
+      fi
+    done
+    if [ "$found" -eq 0 ]; then
+      IFS="$old_ifs"
+      die "unknown item: $item"
+    fi
+  done
+  IFS="$old_ifs"
+}
+
+ensure_dir() {
+  local dir="$1"
+  if [ ! -d "$dir" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "mkdir -p $dir"
+    else
+      mkdir -p "$dir"
+    fi
+  fi
+}
+
+backup_real_file() {
+  local path="$1"
+  local backup
+
+  if [ -e "$path" ] && [ ! -L "$path" ]; then
+    backup="${path}.bak.$(date +%Y%m%d-%H%M%S)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "mv $path $backup"
+    else
+      mv "$path" "$backup"
+      echo "  backed up existing file -> $backup"
+    fi
+  fi
+}
+
+plan_link() {
+  local src="$1"
+  local dest="$2"
+
+  if [ ! -e "$src" ]; then
+    die "missing source: $src"
+  fi
+
+  if [ -L "$dest" ]; then
+    local current
+    current=$(readlink "$dest")
+    if [ "$current" = "$src" ]; then
+      echo "  skip (already linked): $dest"
+      return 0
+    fi
+    echo "  replace symlink: $dest"
+    echo "    was -> $current"
+    echo "    now -> $src"
+  elif [ -e "$dest" ]; then
+    echo "  replace file: $dest"
+    backup_real_file "$dest"
+  else
+    echo "  create symlink: $dest -> $src"
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "ln -sfn $src $dest"
+  else
+    ln -sfn "$src" "$dest"
+  fi
+}
+
+DRY_RUN=0
+WANT_CURSOR_RULES=""
+WANT_CLAUDE_GLOBAL=0
+WANT_SKILLS=""
+WANT_BINS=""
+SKILL_TARGETS=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -n|--dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --cursor-rules)
+      [ $# -ge 2 ] || die "--cursor-rules requires a value"
+      WANT_CURSOR_RULES="$2"
+      shift 2
+      ;;
+    --claude-global)
+      WANT_CLAUDE_GLOBAL=1
+      shift
+      ;;
+    --skills)
+      [ $# -ge 2 ] || die "--skills requires a value"
+      WANT_SKILLS="$2"
+      shift 2
+      ;;
+    --skill-target)
+      [ $# -ge 2 ] || die "--skill-target requires a value"
+      case "$2" in
+        claude|cursor|brain) ;;
+        *) die "unknown skill target: $2 (use claude, cursor, or brain)" ;;
+      esac
+      if [ -z "$SKILL_TARGETS" ]; then
+        SKILL_TARGETS="$2"
+      else
+        SKILL_TARGETS="$SKILL_TARGETS,$2"
+      fi
+      shift 2
+      ;;
+    --bins)
+      [ $# -ge 2 ] || die "--bins requires a value"
+      WANT_BINS="$2"
+      shift 2
+      ;;
+    *)
+      die "unknown option: $1 (try --help)"
+      ;;
+  esac
+done
+
+if ! need_tty; then
+  if [ -z "$WANT_CURSOR_RULES" ] && [ "$WANT_CLAUDE_GLOBAL" -eq 0 ] && \
+     [ -z "$WANT_SKILLS" ] && [ -z "$WANT_BINS" ]; then
+    die "no TTY and no selections passed; use flags or run interactively"
+  fi
+fi
+
+SELECTED_RULES=()
+SELECTED_SKILLS=()
+SELECTED_BINS=()
+SELECTED_SKILL_TARGETS=()
+
+if need_tty && [ -z "$WANT_CURSOR_RULES" ] && [ "$WANT_CLAUDE_GLOBAL" -eq 0 ] && \
+   [ -z "$WANT_SKILLS" ] && [ -z "$WANT_BINS" ]; then
+  echo "$PROG — symlink installer"
+  echo "Repo: $REPO_ROOT"
+  echo
+
+  CATEGORY_LABELS=(
+    "Cursor rules -> ~/.cursor/rules/"
+    "Claude global CLAUDE.md -> ~/.claude/CLAUDE.md"
+    "Skills -> ~/.claude/skills/"
+    "Skills -> ~/.cursor/skills/"
+    "Skills -> $BRAIN_SKILLS_DIR"
+    "Binaries -> ~/.local/bin/"
+  )
+
+  pick_from_list "What do you want to link?" "${CATEGORY_LABELS[@]}"
+
+  for cat in "${PICK_RESULT[@]}"; do
+    case "$cat" in
+      "Cursor rules -> ~/.cursor/rules/")
+        pick_from_list "Which Cursor rules?" "${CURSOR_RULES[@]}"
+        SELECTED_RULES=("${PICK_RESULT[@]}")
+        ;;
+      "Claude global CLAUDE.md -> ~/.claude/CLAUDE.md")
+        WANT_CLAUDE_GLOBAL=1
+        ;;
+      "Skills -> ~/.claude/skills/")
+        if [ ${#SELECTED_SKILLS[@]} -eq 0 ]; then
+          pick_from_list "Which skills?" "${SKILLS[@]}"
+          SELECTED_SKILLS=("${PICK_RESULT[@]}")
+        fi
+        SELECTED_SKILL_TARGETS+=("claude")
+        ;;
+      "Skills -> ~/.cursor/skills/")
+        if [ ${#SELECTED_SKILLS[@]} -eq 0 ]; then
+          pick_from_list "Which skills?" "${SKILLS[@]}"
+          SELECTED_SKILLS=("${PICK_RESULT[@]}")
+        fi
+        SELECTED_SKILL_TARGETS+=("cursor")
+        ;;
+      "Skills -> $BRAIN_SKILLS_DIR")
+        if [ ${#SELECTED_SKILLS[@]} -eq 0 ]; then
+          pick_from_list "Which skills?" "${SKILLS[@]}"
+          SELECTED_SKILLS=("${PICK_RESULT[@]}")
+        fi
+        SELECTED_SKILL_TARGETS+=("brain")
+        ;;
+      "Binaries -> ~/.local/bin/")
+        pick_from_list "Which binaries?" "${BINS[@]}"
+        SELECTED_BINS=("${PICK_RESULT[@]}")
+        ;;
+    esac
+  done
+else
+  if [ -n "$WANT_CURSOR_RULES" ]; then
+    while IFS= read -r item; do
+      [ -n "$item" ] && SELECTED_RULES+=("$item")
+    done <<EOF
+$(list_from_csv_or_all "$WANT_CURSOR_RULES" CURSOR_RULES)
+EOF
+  fi
+
+  if [ "$WANT_CLAUDE_GLOBAL" -eq 1 ]; then
+    :
+  fi
+
+  if [ -n "$WANT_SKILLS" ]; then
+    while IFS= read -r item; do
+      [ -n "$item" ] && SELECTED_SKILLS+=("$item")
+    done <<EOF
+$(list_from_csv_or_all "$WANT_SKILLS" SKILLS)
+EOF
+  fi
+
+  if [ -n "$WANT_BINS" ]; then
+    while IFS= read -r item; do
+      [ -n "$item" ] && SELECTED_BINS+=("$item")
+    done <<EOF
+$(list_from_csv_or_all "$WANT_BINS" BINS)
+EOF
+  fi
+
+  if [ -n "$SKILL_TARGETS" ]; then
+    old_ifs="$IFS"
+    IFS=','
+    for part in $SKILL_TARGETS; do
+      [ -n "$part" ] && SELECTED_SKILL_TARGETS+=("$part")
+    done
+    IFS="$old_ifs"
+  elif [ ${#SELECTED_SKILLS[@]} -gt 0 ]; then
+    SELECTED_SKILL_TARGETS=("claude")
+  fi
+fi
+
+if [ ${#SELECTED_RULES[@]} -eq 0 ] && [ "$WANT_CLAUDE_GLOBAL" -eq 0 ] && \
+   [ ${#SELECTED_SKILLS[@]} -eq 0 ] && [ ${#SELECTED_BINS[@]} -eq 0 ]; then
+  echo "Nothing selected. Exiting."
+  exit 0
+fi
+
+echo
+echo "Plan:"
+if [ ${#SELECTED_RULES[@]} -gt 0 ]; then
+  echo "  Cursor rules:"
+  for rule in "${SELECTED_RULES[@]}"; do
+    echo "    $rule -> ~/.cursor/rules/$rule"
+  done
+fi
+if [ "$WANT_CLAUDE_GLOBAL" -eq 1 ]; then
+  echo "  Claude global:"
+  echo "    claude-global/CLAUDE.md -> ~/.claude/CLAUDE.md"
+fi
+if [ ${#SELECTED_SKILLS[@]} -gt 0 ]; then
+  echo "  Skills:"
+  for target in "${SELECTED_SKILL_TARGETS[@]}"; do
+    case "$target" in
+      claude) echo "    target ~/.claude/skills/" ;;
+      cursor) echo "    target ~/.cursor/skills/" ;;
+      brain)  echo "    target $BRAIN_SKILLS_DIR" ;;
+    esac
+  done
+  for skill in "${SELECTED_SKILLS[@]}"; do
+    echo "    $skill"
+  done
+fi
+if [ ${#SELECTED_BINS[@]} -gt 0 ]; then
+  echo "  Binaries:"
+  for bin_name in "${SELECTED_BINS[@]}"; do
+    echo "    $bin_name -> ~/.local/bin/$bin_name"
+  done
+fi
+echo
+
+if need_tty; then
+  prompt_yes "Apply these symlinks?" y || exit 0
+fi
+
+ensure_dir "$HOME/.cursor/rules"
+ensure_dir "$HOME/.claude"
+ensure_dir "$HOME/.claude/skills"
+ensure_dir "$HOME/.cursor/skills"
+ensure_dir "$HOME/.local/bin"
+
+if [ ${#SELECTED_RULES[@]} -gt 0 ]; then
+  echo "Cursor rules:"
+  for rule in "${SELECTED_RULES[@]}"; do
+    plan_link "$REPO_ROOT/cursor-rules/$rule" "$HOME/.cursor/rules/$rule"
+  done
+fi
+
+if [ "$WANT_CLAUDE_GLOBAL" -eq 1 ]; then
+  echo "Claude global:"
+  plan_link "$REPO_ROOT/claude-global/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
+fi
+
+if [ ${#SELECTED_SKILLS[@]} -gt 0 ]; then
+  echo "Skills:"
+  for target in "${SELECTED_SKILL_TARGETS[@]}"; do
+    case "$target" in
+      claude)
+        dest_root="$HOME/.claude/skills"
+        ;;
+      cursor)
+        dest_root="$HOME/.cursor/skills"
+        ensure_dir "$dest_root"
+        ;;
+      brain)
+        dest_root="$BRAIN_SKILLS_DIR"
+        ensure_dir "$dest_root"
+        ;;
+      *)
+        die "unknown skill target: $target"
+        ;;
+    esac
+    for skill in "${SELECTED_SKILLS[@]}"; do
+      plan_link "$REPO_ROOT/skills/$skill" "$dest_root/$skill"
+    done
+  done
+fi
+
+if [ ${#SELECTED_BINS[@]} -gt 0 ]; then
+  echo "Binaries:"
+  for bin_name in "${SELECTED_BINS[@]}"; do
+    plan_link "$REPO_ROOT/bin/$bin_name" "$HOME/.local/bin/$bin_name"
+  done
+fi
+
+echo
+echo "Done."
