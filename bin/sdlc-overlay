@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Mirror the SDLC-skills local standards overlay into this repo, and back.
+#
+# The overlay is git-ignored inside SDLC-skills by design -- that is what keeps a
+# team's own how-tos out of a branch headed for enterprise. It also means the
+# overlay has no history and no backup there: one `git clean -fdx` and it is gone.
+# This repo is the backup, and the way the overlay travels between machines.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mirror="$here/overlays/sdlc-skills"
+repo="${SDLC_SKILLS_REPO:-$(cd "$here/.." && pwd)/SDLC-skills}"
+live="$repo/skills/_shared"
+
+usage() {
+  cat <<'USAGE'
+usage: sdlc-overlay <backup|restore|status>
+
+  backup    live overlay  ->  this repo   (run after capturing a local standard)
+  restore   this repo     ->  live overlay (run on a fresh clone or after a bad clean)
+  status    show what differs, change nothing
+
+Set SDLC_SKILLS_REPO to point at a checkout other than ../SDLC-skills.
+USAGE
+}
+
+[ -d "$repo" ] || { echo "no SDLC-skills checkout at $repo" >&2; exit 2; }
+
+copy() {  # copy <src-dir> <dst-dir> <src-json> <dst-json>
+  mkdir -p "$2"
+  rsync -a --delete "$1/" "$2/"
+  [ -f "$3" ] && cp "$3" "$4" || true
+}
+
+case "${1:-}" in
+  backup)
+    [ -d "$live/standards.local" ] || { echo "no live overlay at $live/standards.local" >&2; exit 1; }
+    copy "$live/standards.local" "$mirror/standards.local" \
+         "$live/selection-facts.local.json" "$mirror/selection-facts.local.json"
+    echo "backed up $(find "$mirror/standards.local" -type f | wc -l | tr -d ' ') file(s) to $mirror"
+    echo "commit them here so the overlay has history."
+    ;;
+  restore)
+    [ -d "$mirror/standards.local" ] || { echo "nothing mirrored at $mirror" >&2; exit 1; }
+    copy "$mirror/standards.local" "$live/standards.local" \
+         "$mirror/selection-facts.local.json" "$live/selection-facts.local.json"
+    echo "restored to $live/standards.local"
+    echo "verify: (cd $repo && git status --short)  -- the overlay must stay invisible."
+    ;;
+  status)
+    echo "live:   $live/standards.local"
+    echo "mirror: $mirror/standards.local"
+    echo
+    diff -ru "$mirror/standards.local" "$live/standards.local" 2>&1 | head -40 \
+      && echo "standards.local: in sync" || true
+    diff -u "$mirror/selection-facts.local.json" "$live/selection-facts.local.json" 2>&1 | head -20 \
+      && echo "selection-facts.local.json: in sync" || true
+    ;;
+  *) usage; exit 2 ;;
+esac

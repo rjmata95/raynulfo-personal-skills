@@ -322,3 +322,21 @@ above means there should not be any.
 
 `docs/specs/2026-08-07-dbq-design.md` records the problem, the alternatives considered, the
 verified environment facts behind each decision, and the risks with mitigations.
+
+## SDLC-skills local standards overlay
+
+`overlays/sdlc-skills/` mirrors the git-ignored local standards overlay from the SDLC-skills fork
+(`skills/_shared/standards.local/` and `selection-facts.local.json`).
+
+Those files are git-ignored in that repo by design — it is what keeps a machine-local stack out of a
+branch headed for enterprise. The cost is that they have no history and no backup there: one
+`git clean -fdx` and they are gone for good. This repo is the backup, and the way the overlay travels
+between machines.
+
+```bash
+bin/sdlc-overlay backup    # live overlay -> here. Run after capturing a local standard, then commit.
+bin/sdlc-overlay restore   # here -> live overlay. Fresh clone, or recovery after a bad clean.
+bin/sdlc-overlay status    # what differs, changes nothing
+```
+
+Point `SDLC_SKILLS_REPO` at a checkout other than `../SDLC-skills`.

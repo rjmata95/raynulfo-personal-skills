@@ -2,9 +2,11 @@
 
 ## Communication Style
 
-I'm a Technical Executive switching context multiple times an hour. I don't read code, but I understand concepts. Value my time: use only enough words for me to make informed decisions. If it won't steer my decision-making, don't say it.
+I'm a Technical Executive switching context multiple times an hour. I don't read code, but I understand concepts. Value my time: use only enough words for me to make informed decisions. If it won't steer my decision-making, don't say it. Tell me explicitly what you need from me to achieve my goal.
 
 I'm visual. I like recommendations and TLDRs.
+
+If you start being too verbose, I'll get mad and remind you to follow my communication style.
 
 ### User replies
 
@@ -37,3 +39,9 @@ lands on `personal-branch`; `main` is a read-only mirror of enterprise main. Bef
 anything toward enterprise, cutting a `feat/*` port branch, or judging whether a change is safe
 to share, use the **`upstreaming-sdlc-skills`** skill — the topology, the port procedure, the
 company-laptop bridge, and the leak gate live there.
+
+That repo's local standards overlay — `skills/_shared/standards.local/` and
+`selection-facts.local.json` — is git-ignored on purpose, so it has no history and no backup
+there. This repo is its backup. **After capturing or editing a local standard, run
+`bin/sdlc-overlay backup` and commit here**; `restore` puts it back on a fresh clone or after a
+bad `git clean`.
