@@ -45,14 +45,13 @@ find new ones.
 
 | File | What to drop |
 |---|---|
-| `skills/_shared/selection-facts.json` | `"ts-nest"`, `"react-rest"` from the `stack` enum |
-| `skills/_shared/standards/INDEX.md` | the `fe-react-rest` row; `\|\| stack == ts-nest` in `be-layered-service` |
-| `skills/_shared/standards/180-be-layered-service.md` | the `ts-nest` predicate clause, the `npm test` verify branch, the reference-table row |
-| `skills/_shared/plan-template.md` | the `[stack: ts-nest]` and `[stack: react-rest]` tag examples |
-| `CHANGELOG.md` | the two personal stacks in the `stack` fact entry; the `fe-react-rest` entry |
 | `skills/_shared/config.md` | the Jira Cloud auth and `Subtask` spelling paragraphs |
 | `skills/_shared/tools/sync_jira_status.py` | `JIRA_EMAIL` deployment inference and the Basic-auth branch |
 | `skills/_shared/tools/config_parser.py`, `find_or_create_subtask.py` | the same auth-mode switch |
+
+The stack rows are gone as of the local-standards overlay: `ts-nest` and `react-rest` now live in
+`skills/_shared/standards.local/`, which is git-ignored and therefore cannot appear in a port branch
+at all. `test-no-local-value-leaks.sh` in SDLC-skills fails the suite if one creeps back.
 
 ## Plausibility quarantine — technically clean, still does not cross
 

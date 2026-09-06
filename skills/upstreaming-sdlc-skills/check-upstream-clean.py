@@ -22,8 +22,9 @@ import sys
 
 # Paths that must never appear on a port branch.
 QUARANTINE_PATHS = [
-    "skills/_shared/standards/*ts-nest*",
-    "skills/_shared/standards/*react-rest*",
+    "skills/_shared/standards.local/*",
+    "skills/_shared/standards.local/**",
+    "skills/_shared/selection-facts.local.json",
     "skills/_shared/validators/test-jira-auth-mode.py",
     "sdlc/*",
     "sdlc/**",
