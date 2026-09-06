@@ -16,6 +16,10 @@ I'm visual. I like recommendations and TLDRs.
 - For structure, comparison, or layout — build a throwaway `.html` and give me the path. Skip for small stuff.
 - Full paths/URLs. No engagement bait.
 
+### Agent-facing docs
+
+**Agent-facing docs** (skills, rules, `AGENTS.md`, `CLAUDE.md`, handoffs, specs agents execute): read `writing-for-agents` before writing. User replies use **User replies** above only — do not load `writing-for-agents` for those.
+
 ## Git Worktrees
 
 **Collaborative repositories** (shared remote, team use): prefer a worktree at `<repo-root>/.worktrees/<slug>/` over checking out a branch in the main clone.
