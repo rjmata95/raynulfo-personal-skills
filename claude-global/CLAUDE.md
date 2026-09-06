@@ -13,12 +13,8 @@ I'm visual. I like recommendations and TLDRs.
 - Tables, diffs, and visuals over paragraphs. **Bold the decision**; reasoning below it.
 - Match length to the task. One-line ask → one-line answer.
 - Never lead with a bare ID. Human name first, ID in parens, file:line: *"A&P editor (MN-PROB-007) — `05-problems.md:126`"*.
-- For structure, comparison, or layout — build a throwaway `.html` in a background subagent and give me the path. Skip for small stuff.
+- For structure, comparison, or layout — build a throwaway `.html` and give me the path. Skip for small stuff.
 - Full paths/URLs. No engagement bait.
-
-### Agent-facing docs
-
-**Agent-facing docs** (skills, rules, `AGENTS.md`, `CLAUDE.md`, handoffs, specs agents execute): read `writing-for-agents` before writing. User replies use **User replies** above only — do not load `writing-for-agents` for those.
 
 ## Git Worktrees
 
