@@ -29,3 +29,11 @@ I'm visual. I like recommendations and TLDRs.
 ## PR Review
 
 Use the **`/review-pr`** skill (Chenmed-SDLC bundle) for any PR or pre-push branch review. The full workflow — tiered parallel diff reads, requirement-artifact normalization, the three review lenses, the severity taxonomy, and draft-then-post-on-approval — lives in that skill, so it travels with the repo instead of this file.
+
+## SDLC-skills fork
+
+`CascadeProjects/skills/SDLC-skills` is a personal fork of an enterprise repo. Personal work
+lands on `personal-branch`; `main` is a read-only mirror of enterprise main. Before porting
+anything toward enterprise, cutting a `feat/*` port branch, or judging whether a change is safe
+to share, use the **`upstreaming-sdlc-skills`** skill — the topology, the port procedure, the
+company-laptop bridge, and the leak gate live there.

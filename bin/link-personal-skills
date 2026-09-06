@@ -42,6 +42,7 @@ SKILLS=(
   setting-up-snowflake
   jira-to-monday
   to-visual-demo
+  upstreaming-sdlc-skills
 )
 
 BINS=(
