@@ -18,7 +18,7 @@ I'm visual. I like recommendations and TLDRs.
 
 ### Agent-facing docs
 
-**Agent-facing docs** (skills, rules, `AGENTS.md`, `CLAUDE.md`, handoffs, specs agents execute): read `writing-for-agents` before writing. User replies use **User replies** above only — do not load `writing-for-agents` for those.
+**Agent-facing docs** (skills, rules, `AGENTS.md`, `CLAUDE.md`, handoffs, specs agents execute): read `writing-for-agents` before writing. User replies use **User replies** above only.
 
 ## Git Worktrees
 
