@@ -1,5 +1,11 @@
 {
   "facts": {
-    "stack": ["ts-nest", "react-rest"]
+    "stack": [
+      "ts-nest",
+      "react-rest"
+    ],
+    "discipline": [
+      "Docs"
+    ]
   }
 }
