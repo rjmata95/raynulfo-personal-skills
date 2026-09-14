@@ -44,7 +44,11 @@ Judge the doc against these before judging its prose.
 5. **GREEN — rewrite.** One SSOT holding goal + standard + exit condition; every hook becomes
    trigger + pointer; every packet an agent actually receives (implementer prompt, dispatch
    template) gets a structural slot for the new material; coined words replaced by pretrained
-   ones. Update fixtures to the new shape.
+   ones. Update fixtures to the new shape. Then run `references/enum-diff.py` and
+   `references/heading-diff.py` (baseline vs after): every backticked token and heading that
+   vanished is either moved to the file that now owns it or a dropped branch — a verdict, a
+   config state, a developer action pruned out of an enumerated list is the regression a
+   shortening pass produces, and reviewers find it before you do.
 6. **Re-run the same scenarios** into `$TMPDIR/<slug>/after/`. Variance is the metric: reps should
    converge on the same shape; when the baseline already converged, guidance words loaded per
    scenario is the metric. Close each residual "not determinable" with a default or a slot. A fix
@@ -65,3 +69,7 @@ pass, and the handoff carries both tables.
 - Prohibitions where a recipe was needed: "never invent a serve step" made agents refuse to write
   any capture code; a four-line recipe made them write the right one.
 - Growing the always-loaded hook. Cost lands on every run; the SSOT loads only when it fires.
+- Testing a rule that spans two files from one seat only. A `STALE` path added to the verifier
+  and never mirrored in the orchestrator's routing table passed every verifier scenario.
+- Personal project names in examples, handoffs, or test tokens of enterprise-bound text. Use the
+  bundle's own vocabulary and grep for the personal identifiers before every push.
