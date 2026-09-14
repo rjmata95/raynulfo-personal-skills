@@ -12,7 +12,9 @@ Question: <what exactly do you do now / produce>. Be concrete and literal — ex
 their content, exact calls with arguments, exact status you return. If any of that is not
 determinable from the guidance, say precisely what is missing. Do not ask me questions; make
 your best call and state assumptions. Dry run — do not run or edit anything.
-Write your full answer to <OUT>/<scenario>-<rep>.md. Return only a 3-line summary:
+Write your full answer to <OUT>/<scenario>-<rep>.md, ending with a `## Files loaded` table —
+one row per guidance file opened: `| path | words |` — so load per scenario can be tabulated.
+Return only a 3-line summary:
 (1) <the key choice>, (2) <the key value or shape>, (3) <STOP / status / question raised>.
 ```
 
@@ -41,5 +43,8 @@ summary rows side by side.
 - Run the repo's validation suite with the sandbox disabled and an **absolute** script path; a
   sandboxed `mktemp` fails and some test scripts then misbehave — one resolved its temp dir to
   `$PWD` and removed it on exit. Commit before running any individual test script.
-- Worktree sessions refuse `git -C` and compound git invocations; use plain commands from the
-  worktree.
+- Worktree sessions refuse `git -C`, compound git invocations, and shell loops that call `bash`;
+  use plain commands from the worktree and put validator loops in a script file.
+- At most 20 subagents run at once; a dispatch past the cap errors instead of queueing, so record
+  which reps failed and re-dispatch them once slots free.
+- Wait for a batch with a background `until` loop on the output count, not with sleeps.

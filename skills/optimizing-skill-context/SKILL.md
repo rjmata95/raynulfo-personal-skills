@@ -24,10 +24,15 @@ Judge the doc against these before judging its prose.
 ## Recipe
 
 1. **Map the chain.** List every file the feature loads per phase (design, plan, implement, review),
-   which are always-loaded and which are disclosed, and where the same meaning appears twice.
+   which are always-loaded and which are disclosed, and where the same meaning appears twice. Find
+   the repo's own guard rails — phrase-keyed evals, structure validators — and run them before any
+   edit; an eval pattern is a regex that must match on one line, so its phrase survives verbatim.
 2. **Pick a guinea pig.** A real repo plus a real artifact (prototype, spec, plan) the feature is
-   for. Write 2–4 fixtures in `$TMPDIR/<slug>/fixtures/`: the input each phase would receive.
-3. **RED — baseline.** Snapshot the current files to `$TMPDIR/<slug>/baseline/`. For each phase
+   for. Write 2–4 fixtures in `$TMPDIR/<slug>/fixtures/`: the input each phase would receive. Know
+   which fixture facts are real: an invented cite tests the absent-source path, and only that.
+3. **RED — baseline.** Snapshot the current files to `$TMPDIR/<slug>/baseline/` — everything the
+   skill text references (validators, tools, local config), or a missing script reads as a guidance
+   gap in every rep and pollutes the metric. For each phase
    write one scenario that tempts the failure (a mid-loop state, a missing value, a source the enum
    forgot). Dispatch **3 reps for authoring scenarios, 5 for loop/decision scenarios**, model
    `sonnet`, using `references/scenario-dispatch.md`. Read every output; tabulate per scenario:
@@ -41,7 +46,9 @@ Judge the doc against these before judging its prose.
    template) gets a structural slot for the new material; coined words replaced by pretrained
    ones. Update fixtures to the new shape.
 6. **Re-run the same scenarios** into `$TMPDIR/<slug>/after/`. Variance is the metric: reps should
-   converge on the same shape. Close each residual "not determinable" with a default or a slot.
+   converge on the same shape; when the baseline already converged, guidance words loaded per
+   scenario is the metric. Close each residual "not determinable" with a default or a slot. A fix
+   made after this run gets its own re-run of the scenario it touched.
 7. **Test the no-trigger path** (3 reps): a story the feature does not apply to. Confirm the agent
    opens no disclosed file, asks nothing, writes at most one recorded skip line.
 8. **Ship.** Run the repo validators (`references/scenario-dispatch.md` § Sandbox), commit before
