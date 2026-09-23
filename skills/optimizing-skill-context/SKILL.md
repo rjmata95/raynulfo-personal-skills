@@ -1,0 +1,75 @@
+---
+name: optimizing-skill-context
+description: Use when a skill, shared reference, or agent doc must be reviewed or rewritten for goal clarity, context load, or inconsistent agent output — before any edit, and before claiming the rewrite works.
+---
+
+# Optimizing skill context
+
+Baseline Sonnet-class subagents on the current text, classify what they could not determine or
+invented, rewrite, re-run the same scenarios, compare. This skill is the recipe and the bar; the
+writing levers live in `writing-for-agents` and `superpowers:writing-skills` (required background).
+
+## The bar
+
+Every agent the doc serves must be able to name three things from the text alone:
+
+| Piece | Question the text must answer | Failure smell |
+|---|---|---|
+| **Goal** | What shape is the output? Which fields, which entry per what? | Agents invent a shape; each run differs |
+| **Standard** | How do we do it here? | Rules restated in several files, drifting |
+| **Exit condition** | How does the agent know it is done without a human? | "Not determinable from the guidance"; loops with no bound; escalate with no home |
+
+Judge the doc against these before judging its prose.
+
+## Recipe
+
+1. **Map the chain.** List every file the feature loads per phase (design, plan, implement, review),
+   which are always-loaded and which are disclosed, and where the same meaning appears twice. Find
+   the repo's own guard rails — phrase-keyed evals, structure validators — and run them before any
+   edit; an eval pattern is a regex that must match on one line, so its phrase survives verbatim.
+2. **Pick a guinea pig.** A real repo plus a real artifact (prototype, spec, plan) the feature is
+   for. Write 2–4 fixtures in `$TMPDIR/<slug>/fixtures/`: the input each phase would receive. Know
+   which fixture facts are real: an invented cite tests the absent-source path, and only that.
+3. **RED — baseline.** Snapshot the current files to `$TMPDIR/<slug>/baseline/` — everything the
+   skill text references (validators, tools, local config), or a missing script reads as a guidance
+   gap in every rep and pollutes the metric. For each phase
+   write one scenario that tempts the failure (a mid-loop state, a missing value, a source the enum
+   forgot). Dispatch **3 reps for authoring scenarios, 5 for loop/decision scenarios**, model
+   `sonnet`, using `references/scenario-dispatch.md`. Read every output; tabulate per scenario:
+   what shape they produced, what they could not determine, what they invented, what they asked.
+4. **Classify each failure by form** (`writing-skills` § Match the Form to the Failure): missing
+   shape → recipe or template slot; value agents invent → a default in the SSOT; state lost across
+   dispatches → a file ledger; rule skipped under pressure → rationalization table; behaviour that
+   depends on a condition → predicate the agent can evaluate without loading the disclosed file.
+5. **GREEN — rewrite.** One SSOT holding goal + standard + exit condition; every hook becomes
+   trigger + pointer; every packet an agent actually receives (implementer prompt, dispatch
+   template) gets a structural slot for the new material; coined words replaced by pretrained
+   ones. Update fixtures to the new shape. Then run `references/enum-diff.py` and
+   `references/heading-diff.py` (baseline vs after): every backticked token and heading that
+   vanished is either moved to the file that now owns it or a dropped branch — a verdict, a
+   config state, a developer action pruned out of an enumerated list is the regression a
+   shortening pass produces, and reviewers find it before you do.
+6. **Re-run the same scenarios** into `$TMPDIR/<slug>/after/`. Variance is the metric: reps should
+   converge on the same shape; when the baseline already converged, guidance words loaded per
+   scenario is the metric. Close each residual "not determinable" with a default or a slot. A fix
+   made after this run gets its own re-run of the scenario it touched.
+7. **Test the no-trigger path** (3 reps): a story the feature does not apply to. Confirm the agent
+   opens no disclosed file, asks nothing, writes at most one recorded skip line.
+8. **Ship.** Run the repo validators (`references/scenario-dispatch.md` § Sandbox), commit before
+   any test script runs, write the handoff with the before/after table and the disposition of any
+   prior review, open the PR.
+
+**Done when:** every scenario's after-run converges, the no-trigger run loads nothing, validators
+pass, and the handoff carries both tables.
+
+## Common mistakes
+
+- GREEN fixtures still in the old shape: agents flag the fixture and the run measures nothing.
+- Letting subagents return full outputs. Have them write to a file and return three lines.
+- Prohibitions where a recipe was needed: "never invent a serve step" made agents refuse to write
+  any capture code; a four-line recipe made them write the right one.
+- Growing the always-loaded hook. Cost lands on every run; the SSOT loads only when it fires.
+- Testing a rule that spans two files from one seat only. A `STALE` path added to the verifier
+  and never mirrored in the orchestrator's routing table passed every verifier scenario.
+- Personal project names in examples, handoffs, or test tokens of enterprise-bound text. Use the
+  bundle's own vocabulary and grep for the personal identifiers before every push.
