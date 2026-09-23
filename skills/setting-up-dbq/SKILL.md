@@ -1,6 +1,6 @@
 ---
 name: setting-up-dbq
-description: Install and configure the dbq database CLI on a machine, and migrate off per-database MongoDB/MySQL MCP servers. Use when dbq is not installed or not configured, when `dbq doctor` reports problems, when a user wants to remove/replace database MCP servers, when setting up a new laptop, when onboarding a teammate to dbq, or when a user says "set up dbq", "migrate off the DB MCPs", "plug and play the database CLI", or asks how to get database access working.
+description: Install and configure the dbq database CLI on a machine, add a MongoDB/MySQL/Postgres connection, and migrate off per-database MCP servers. Use when dbq is not installed or not configured, when a user wants agents to query a new database, when `dbq doctor` reports problems, when a user wants to remove/replace database MCP servers, when setting up a new laptop, when onboarding a teammate to dbq, or when a user says "set up dbq", "migrate off the DB MCPs", "plug and play the database CLI", or asks how to get database access working.
 ---
 
 # Setting up `dbq`
@@ -17,7 +17,7 @@ next.
 never pass through a transcript. Your job at that step is to print the command and **stop**.
 
 Also forbidden:
-- Reading `~/.config/dbq/env` or `~/.config/dbq/my.cnf`.
+- Reading `~/.config/dbq/env`, `~/.config/dbq/my.cnf`, or `~/.config/dbq/pg_service.conf`.
 - Reading `MDB_MCP_CONNECTION_STRING` / `MYSQL_PASSWORD` values out of `~/.claude.json`.
 - Writing a credential file yourself, or scripting the harvest "just to save the user time".
 - Asking the user to paste a connection string into the conversation.
@@ -62,6 +62,7 @@ Only what TOOLS reports missing. Both are safe, non-secret operations you perfor
 ```bash
 brew install mongosh        # mongo shell
 brew install mysql-client   # mysql CLI, if absent
+brew install libpq && brew link --force libpq   # psql, if absent
 ```
 
 Put `dbq` on PATH via a symlink, so git stays the source of truth:
@@ -105,6 +106,7 @@ Choose the mode by situation:
 | Fresh machine, no MCP servers | `dbq init` |
 | One alias broken | `dbq init --alias <name>` |
 | Adding their own database | `dbq init --add` |
+| Adding a Postgres database | `dbq init --add`, kind `postgres` — see Postgres below |
 
 **Do not proceed past this step on your own.** No credential means no verification, and no
 verification means the cutover in step 6 is unsafe.
@@ -208,6 +210,24 @@ the gotchas travel with the skill.
 If they need a database nobody has registered yet, `dbq init --add` writes it to their
 local overlay. If it turns out to be broadly useful, add the row to
 `config/connections.conf` (no hostnames, no secrets) and commit.
+
+## Postgres connections
+
+Postgres is added with `dbq init --add` (kind `postgres`). Before the handoff, collect the
+non-secret connection facts yourself from infra code or runbooks, and give them to the user
+for the prompts:
+
+| Prompt | What to find |
+|---|---|
+| Host | An address **this laptop** can reach: a public IP, or `127.0.0.1` behind the Cloud SQL Auth Proxy. The host in an app's DSN secret is often a private VPC IP, and that times out. |
+| User | The least-privileged login role. Prefer a read-only role. A superuser-class role (`cloudsqlsuperuser`) bypasses row-level security. |
+| Database / SSL mode | Database name; `require` unless the server has TLS off. |
+
+Name the password's **location** (the Secret Manager secret name) so the user can fetch it.
+Never fetch it yourself.
+
+If the database uses row-level security, record the `SET` it needs in
+`knowledge/<alias>/_schema.md`. Without it, every query returns 0 rows and no error.
 
 ## Troubleshooting
 

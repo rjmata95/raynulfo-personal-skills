@@ -1,7 +1,7 @@
 ---
 alias: <alias>
-kind: <mongo|mysql>
-env: <prod|nonprod|qa|local>
+kind: <mongo|mysql|postgres>
+env: <prod|nonprod|dev|qa|local>
 last_verified: YYYY-MM-DD
 ---
 

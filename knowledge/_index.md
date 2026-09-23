@@ -22,6 +22,7 @@ What each alias has documented, and how fresh it is. **Read the relevant
 | `tenant-mgmt` | mongo | prod | databases | yes | 2026-08-07 |
 | `medication-nonprod` | mongo | nonprod | databases | yes | 2026-08-07 |
 | `mysql-qa` | mysql | qa | — | — | **not verified** (ERROR 2059 — see below) |
+| `betterlife-dev` | postgres | dev | tables + RLS (from migrations) | yes | 2026-09-23 |
 
 ### `mysql-qa` is not yet migrated
 
@@ -77,6 +78,9 @@ time on 2026-08-07 and is why `default_db` is `-` for every Mongo cluster in the
   `patient-allergy-relay-uat` only in the prod medication cluster.
 - **Mongo is the operational store; BIDW MySQL is ETL-fed and trails it.** Counts that
   disagree may be lag rather than a defect.
+- **Postgres tables are schema-qualified, and BetterLife uses row-level security.** Without
+  `SET app.current_tenant`, a `betterlife-dev` query returns 0 rows and no error. See
+  `betterlife-dev/_schema.md`.
 - **All aliases are read-only.** Writes go through GraphQL mutations so the Phoenix eventing
   engine emits domain events — see the `data-fix-scripts` skill.
 

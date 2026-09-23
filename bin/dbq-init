@@ -184,6 +184,30 @@ load_existing() {
       i=$((i+1))
     done
   fi
+  if [ -r "$PGSVC" ]; then
+    i=0; n=$(reg_count)
+    while [ "$i" -lt "$n" ]; do
+      a="${REG_ALIAS[$i]}"
+      if [ "${REG_KIND[$i]}" = postgres ] && dbq_pg_service_exists "$a"; then
+        blk=$(dbq_pg_service_body "$a")
+        h=$(pg_field "$blk" host); P=$(pg_field "$blk" port); u=$(pg_field "$blk" user)
+        p=$(pg_field "$blk" password); d=$(pg_field "$blk" dbname)
+        # Everything except the fields above is carried forward verbatim
+        # (sslmode, options, …) so regeneration cannot drop it.
+        cred_set "$a" "${h}|${P:-5432}|${u}|${p}|${d}" "existing config" \
+          "$(printf '%s\n' "$blk" | grep -vE '^[[:space:]]*(host|port|user|password|dbname)[[:space:]]*=' | grep -vE '^[[:space:]]*$')"
+      fi
+      i=$((i+1))
+    done
+  fi
+}
+
+# pg_field <section-body> <key> — value after the first '=', whitespace-trimmed.
+pg_field() {
+  printf '%s\n' "$1" | awk -v k="$2" '
+    { line=$0; sub(/^[[:space:]]+/, "", line) }
+    index(line, k) == 1 { rest=substr(line, length(k)+1); sub(/^[[:space:]]*=[[:space:]]*/, "", rest)
+                          if (rest != substr(line, length(k)+1)) { print rest; exit } }'
 }
 
 # ------------------------------------------------------------- MCP harvesting
@@ -276,6 +300,15 @@ test_alias() {
   printf '  testing… '
   if [ "$kind" = mongo ]; then
     if dbq_ping_mongo "$secret"; then printf '%sok%s\n' "$C_GRN" "$C_RESET"; return 0; fi
+  elif [ "$kind" = postgres ]; then
+    IFS='|' read -r h P u p d <<EOF
+$secret
+EOF
+    opts=$(cred_opts "$a" 2>/dev/null || true)
+    if dbq_ping_pg_direct "$h" "${P:-5432}" "$u" "$p" "$d" \
+         "$(printf '%s\n' "$opts" | awk -F'=' '/^[[:space:]]*sslmode/{gsub(/[[:space:]]/,"",$2);print $2}')"; then
+      printf '%sok%s\n' "$C_GRN" "$C_RESET"; return 0
+    fi
   else
     IFS='|' read -r h P u p d <<EOF
 $secret
@@ -378,8 +411,47 @@ EOF
   return 0
 }
 
+prompt_postgres() {
+  local a="$1" cur h P u p d ssl cssl ch cP cu cp cd rest
+  cur=$(cred_get "$a" 2>/dev/null || true)
+  IFS='|' read -r ch cP cu cp cd <<EOF
+${cur:-||||}
+EOF
+  cssl=$(cred_opts "$a" 2>/dev/null | awk -F'=' '/^[[:space:]]*sslmode/{gsub(/[[:space:]]/,"",$2);print $2}')
+  say ""
+  dbq_dim "  Use the host your laptop can reach — a public IP, or 127.0.0.1 if you"
+  dbq_dim "  run the Cloud SQL Auth Proxy. A private VPC IP will time out."
+  printf '  Host [%s]: ' "${ch:-}"; IFS= read -r h; h="${h:-$ch}"
+  if [ -z "$h" ]; then printf '  %shost is required%s\n' "$C_RED" "$C_RESET"; return 1; fi
+  printf '  Port [%s]: ' "${cP:-5432}"; IFS= read -r P; P="${P:-${cP:-5432}}"
+  printf '  User [%s]: ' "${cu:-}"; IFS= read -r u; u="${u:-$cu}"
+  if [ -z "$u" ]; then printf '  %suser is required%s\n' "$C_RED" "$C_RESET"; return 1; fi
+  printf '  Password (hidden, blank keeps current): '; IFS= read -rs p; printf '\n'
+  p="${p:-$cp}"
+  local dflt="${cd:-$(reg_get ddb "$a")}"
+  [ "$dflt" = "-" ] && dflt=""
+  printf '  Database [%s]: ' "$dflt"; IFS= read -r d; d="${d:-$dflt}"
+  if [ -z "$d" ]; then printf '  %sdatabase is required%s\n' "$C_RED" "$C_RESET"; return 1; fi
+  printf '  SSL mode [disable/prefer/require/verify-full] [%s]: ' "${cssl:-require}"
+  IFS= read -r ssl; ssl="${ssl:-${cssl:-require}}"
+  case "$ssl" in disable|allow|prefer|require|verify-ca|verify-full) ;;
+    *) printf '  %sunknown sslmode "%s"%s\n' "$C_RED" "$ssl" "$C_RESET"; return 1 ;; esac
+  # Keep any other carried-forward options (e.g. an `options` line); replace sslmode.
+  rest=$(cred_opts "$a" 2>/dev/null | grep -vE '^[[:space:]]*sslmode[[:space:]]*=' || true)
+  cred_set "$a" "${h}|${P}|${u}|${p}|${d}" "entered just now"
+  cred_set_opts "$a" "sslmode = ${ssl}${rest:+
+$rest}"
+  unmark_skipped "$a"
+  printf '  %sset%s → %s@%s:%s/%s (sslmode=%s)\n' "$C_GRN" "$C_RESET" "$u" "$h" "$P" "$d" "$ssl"
+  return 0
+}
+
 edit_alias() {
-  if [ "$(reg_get kind "$1")" = mongo ]; then prompt_mongo_uri "$1"; else prompt_mysql "$1"; fi
+  case "$(reg_get kind "$1")" in
+    mongo)    prompt_mongo_uri "$1" ;;
+    postgres) prompt_postgres "$1" ;;
+    *)        prompt_mysql "$1" ;;
+  esac
 }
 
 # ------------------------------------------------------------------ alias walk
@@ -397,6 +469,11 @@ show_alias() {
     secret=$(cred_get "$a")
     if [ "$kind" = mongo ]; then
       shown=$(dbq_mask_uri "$secret")
+    elif [ "$kind" = postgres ]; then
+      IFS='|' read -r h P u p d <<EOF
+$secret
+EOF
+      shown="$u:****@$h:$P/$d"
     else
       IFS='|' read -r h P u p d <<EOF
 $secret
@@ -488,10 +565,10 @@ add_alias() {
     break
   done
   while :; do
-    printf '  Kind [mongo/mysql]: '; IFS= read -r kind
-    case "$kind" in mongo|mysql) break ;; *) printf '  %senter mongo or mysql%s\n' "$C_RED" "$C_RESET" ;; esac
+    printf '  Kind [mongo/mysql/postgres]: '; IFS= read -r kind
+    case "$kind" in mongo|mysql|postgres) break ;; *) printf '  %senter mongo, mysql or postgres%s\n' "$C_RED" "$C_RESET" ;; esac
   done
-  printf '  Environment [prod/nonprod/qa/local] (default nonprod): '; IFS= read -r env
+  printf '  Environment [prod/nonprod/dev/qa/local] (default nonprod): '; IFS= read -r env
   env="${env:-nonprod}"
   printf '  Mode [ro/rw] (default ro): '; IFS= read -r mode
   case "$mode" in rw|RW) mode=rw ;; *) mode=ro ;; esac
@@ -558,6 +635,43 @@ EOF
     done
   } | atomic_write "$MYCNF"
 
+  # postgres libpq service file — password lives here so it never enters argv.
+  # Only written when a postgres alias exists, so non-Postgres setups get no
+  # new file.
+  local pg_any=0
+  i=0; n=$(reg_count)
+  while [ "$i" -lt "$n" ]; do
+    [ "${REG_KIND[$i]}" = postgres ] && pg_any=1
+    i=$((i+1))
+  done
+  if [ "$pg_any" -eq 1 ] || [ -r "$PGSVC" ]; then
+    {
+      printf '# dbq Postgres service file — generated by `dbq init`\n'
+      printf '# chmod 600. dbq selects a section with PGSERVICEFILE + service=<alias>\n\n'
+      i=0
+      while [ "$i" -lt "$n" ]; do
+        a="${REG_ALIAS[$i]}"
+        if [ "${REG_KIND[$i]}" = postgres ] && cred_has "$a"; then
+          secret=$(cred_get "$a")
+          IFS='|' read -r h P u p d <<EOF
+$secret
+EOF
+          printf '[%s]\n' "$a"
+          printf 'host=%s\n' "$h"
+          printf 'port=%s\n' "${P:-5432}"
+          printf 'user=%s\n' "$u"
+          printf 'password=%s\n' "$p"
+          printf 'dbname=%s\n' "$d"
+          opts=$(cred_opts "$a" 2>/dev/null || true)
+          # libpq service files take key=value with no spaces around '='.
+          [ -n "$opts" ] && printf '%s\n' "$opts" | sed -E 's/^[[:space:]]*([a-z_]+)[[:space:]]*=[[:space:]]*/\1=/'
+          printf '\n'
+        fi
+        i=$((i+1))
+      done
+    } | atomic_write "$PGSVC"
+  fi
+
   # skipped list — so doctor says "skipped", not "MISSING", forever
   if [ -n "$(printf '%s' "$SKIPPED" | tr -d ' ')" ]; then
     printf '%s\n' $SKIPPED | grep . | sort -u | atomic_write "$SKIP_FILE"
@@ -619,7 +733,7 @@ write_all
 
 say ""
 printf '%sWritten:%s\n' "$C_BOLD" "$C_RESET"
-for f in "$ENV_FILE" "$MYCNF"; do
+for f in "$ENV_FILE" "$MYCNF" "$PGSVC"; do
   [ -r "$f" ] && printf '  %-44s %s(%s)%s\n' "${f/#$HOME/~}" "$C_DIM" "$(dbq_perms_of "$f")" "$C_RESET"
 done
 [ -r "$SKIP_FILE" ]  && printf '  %-44s %s(%s skipped)%s\n' "${SKIP_FILE/#$HOME/~}" "$C_DIM" "$(grep -c . "$SKIP_FILE" 2>/dev/null || echo 0)" "$C_RESET"

@@ -23,6 +23,7 @@ Use a **symlink, not a copy** — git must stay the source of truth, matching th
 
 **`mongosh is not installed`** → `brew install mongosh`
 **`mysql is not installed`** → `brew install mysql-client` (may need its bin dir on PATH)
+**`psql is not installed`** → `brew install libpq && brew link --force libpq`
 
 **Syntax errors from bash**
 
@@ -54,7 +55,7 @@ you will get this same message. Use Terminal, iTerm, or your IDE's terminal tab.
 **Permissions are `644`, must be `600`**
 
 ```bash
-chmod 600 ~/.config/dbq/env ~/.config/dbq/my.cnf
+chmod 600 ~/.config/dbq/env ~/.config/dbq/my.cnf ~/.config/dbq/pg_service.conf
 ```
 
 `dbq init` sets this automatically; a manual edit or a copy across machines can lose it.
@@ -187,3 +188,18 @@ You almost certainly should not. Writes go through GraphQL mutations so the Phoe
 engine emits domain events; direct writes bypass event emission, validation, audit trails,
 and read-model projections. Use the `data-fix-scripts` skill. `DBQ_ALLOW_WRITE=1` exists for
 genuinely local `rw` aliases only, and cannot override a `ro` alias at all.
+
+## Postgres
+
+| `dbq doctor` says | Cause | Fix |
+|---|---|---|
+| `timed out` | Host is a private IP, or this machine's IP is not on the server's allowlist (Cloud SQL authorized networks) | Use the public IP and allowlist your IP, or run the Cloud SQL Auth Proxy and set host `127.0.0.1` via `dbq init --alias <name>` |
+| `connection refused` | Nothing is listening: the proxy is not running, or the instance is stopped (dev instances may shut down overnight; check the alias's `gotchas.md`) | Start the proxy, or retry during the instance's running hours |
+| `server rejected this client (pg_hba)` | The server refuses this IP or a non-SSL connection | Set SSL mode `require` via `dbq init --alias <name>` |
+| `authentication failed` | Wrong user or password | `dbq init --alias <name>` |
+| `ok`, but every query returns 0 rows | Row-level security, with no tenant/session variable set | `SET <var> = '<value>';` in the same query; see the alias's `knowledge/` |
+
+Credentials live in `~/.config/dbq/pg_service.conf` (libpq service file, chmod 600), one
+`[<alias>]` section per connection. Extra libpq keys you add to a section (for example
+`options=-c app.current_tenant=<uuid>` for a default tenant) are kept when `dbq init`
+regenerates the file.
