@@ -1,6 +1,6 @@
 ---
 name: querying-databases
-description: Query MongoDB and MySQL through the `dbq` CLI instead of per-database MCP servers. Use whenever you need to read from a database — investigate data, check a collection shape, count records, verify a fix, trace an ID across services, or answer "what does this table look like". Also use when a user names a database domain (medication, patient, encounter, practice-mgmt, tenant-mgmt) or asks about prescriptions, pharmacies, offices, providers, tenants, or dashboard/BIDW reporting data. Covers reads only — writes go through GraphQL via the data-fix-scripts skill.
+description: Query MongoDB, MySQL, and Postgres through the `dbq` CLI instead of per-database MCP servers. Use whenever you need to read from a database — investigate data, check a collection shape, count records, verify a fix, trace an ID across services, or answer "what does this table look like". Also use when a user names a database domain (medication, patient, encounter, practice-mgmt, tenant-mgmt, betterlife) or asks about prescriptions, pharmacies, offices, providers, tenants, dashboard/BIDW reporting data, or BetterLife fitness data (workouts, programs, plans, injuries). Covers reads only — writes go through GraphQL via the data-fix-scripts skill.
 ---
 
 # Querying databases with `dbq`
@@ -53,7 +53,7 @@ Mongo.
 
 ## Querying
 
-`dbq` passes real `mongosh` / `mysql` syntax straight through. There is no dbq dialect.
+`dbq` passes real `mongosh` / `mysql` / `psql` syntax straight through. There is no dbq dialect.
 
 ```bash
 # Mongo — name the database, then the collection
@@ -65,6 +65,9 @@ dbq medication 'db.getSiblingDB("pharmacy-query")["pharmacy"].findOne({}, {name:
 
 # MySQL — argument is SQL, default database already selected
 dbq mysql-prod 'SELECT office_id, name FROM office LIMIT 5'
+
+# Postgres — SQL, schema-qualified; SET session variables in the same string
+dbq betterlife-dev "SET app.current_tenant = '<tenant-uuid>'; SELECT count(*) FROM fitness.workout_logs"
 
 # Run a saved script (see Scratch below)
 dbq --file medication ~/.dbq/scratch/2026-08-07/trace-rx.js
@@ -89,6 +92,7 @@ DBQ_DB=encounter-type-query dbq --collections encounter         # collections in
 DBQ_DB=encounter-type-query dbq --schema encounter.encounter-types      # field map + indexes
 DBQ_DB=patient-demographic-query dbq --schema patient.<collection> 1000 # sample more
 dbq --schema mysql-prod.PAT_MEDICATIONS                         # DESCRIBE + SHOW INDEX
+dbq --schema betterlife-dev.fitness.users                       # columns + indexes + FKs
 ```
 
 **Check the `_id` type before building a lookup.** It is a string UUID in some collections and
@@ -106,6 +110,7 @@ For **GraphQL** schema introspection use the `data-fix-scripts` skill's
 
 Read-only aliases reject mutating queries before connecting — `insertOne`, `updateMany`,
 `drop`, `DELETE`, `DROP`, `TRUNCATE`, and friends. This is a tool-level guard, not advice.
+Postgres adds a second, server-side guard; see `references/postgres.md`.
 
 **All writes go through GraphQL mutations** so the Phoenix eventing engine emits proper
 domain events. Direct DB writes bypass event emission, aggregate validation, audit trails,
@@ -146,7 +151,7 @@ When credentials are missing or wrong, print the command and stop:
 > dbq init --alias patient
 > ```
 
-Do not read `~/.config/dbq/env`, `~/.config/dbq/my.cnf`, or the `MDB_MCP_CONNECTION_STRING`
+Do not read `~/.config/dbq/env`, `~/.config/dbq/my.cnf`, `~/.config/dbq/pg_service.conf`, or the `MDB_MCP_CONNECTION_STRING`
 values in `~/.claude.json`. Do not reconstruct a connection string to pass to `mongosh`
 yourself. `dbq doctor` tells you everything you need about connection health without
 exposing a single secret.
@@ -163,14 +168,17 @@ connectivity, and prints masked, actionable hints.
 | `authentication failed` | Stale credential → user runs `dbq init --alias <name>`. |
 | `connected, but user lacks permission` | Read grant missing on that DB; not a dbq problem. |
 | `no credential for '<alias>'` | Never configured → `dbq init`. |
+| `connection refused` | Nothing listening on that host:port — proxy/tunnel down, or the server is stopped. |
+| `server rejected this client (pg_hba)` | Postgres: this machine's IP is not allowlisted, or SSL is required. |
 | `mongosh is not installed` | `brew install mongosh`. |
+| `psql is not installed` | `brew install libpq && brew link --force libpq`. |
 
 `dbq --dump-cmd <alias>` prints the underlying command (credentials **not** expanded) if you
 need to hand the user something to run directly.
 
 ## Adding a connection
 
-Users can add their own databases and aliases — this is not limited to the shipped eight:
+Users can add their own databases and aliases — this is not limited to the shipped aliases:
 
 ```
 dbq init --add
@@ -185,5 +193,6 @@ never requires editing a git-tracked file.
 
 - `references/mongosh.md` — mongosh patterns, output shaping, aggregation tips
 - `references/mysql.md` — MySQL/BIDW patterns and batch output handling
+- `references/postgres.md` — Postgres: TSV output, schema-qualified names, `SET` for session variables, the two read-only guards
 - `references/scratch.md` — scratch workflow and retention
 - `references/capturing-knowledge.md` — **how to write knowledge entries, and the PHI rule**

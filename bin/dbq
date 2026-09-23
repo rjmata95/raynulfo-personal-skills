@@ -3,7 +3,7 @@
 #
 # Design invariants for anyone editing this:
 #   * Credentials NEVER enter argv. Mongo URIs pass through the environment;
-#     MySQL passwords through an option file. Keeps them out of `ps`, shell
+#     MySQL passwords through an option file; Postgres through a libpq service file. Keeps them out of `ps`, shell
 #     history, and agent transcripts.
 #   * `doctor` is read-only and agent-safe. `init` is TTY-only and human-only.
 #   * Everything is idempotent. Re-running any command is always safe.
@@ -13,7 +13,7 @@
 
 set -uo pipefail
 
-DBQ_VERSION="1.0.0"
+DBQ_VERSION="1.1.0"
 DBQ_PROG="dbq"
 
 # Resolve symlinks BEFORE sourcing the library: dbq is normally installed as a
@@ -38,6 +38,12 @@ dbq_init_colors
 
 MONGO_WRITE_RE='\.(insert|insertOne|insertMany|update|updateOne|updateMany|replaceOne|delete|deleteOne|deleteMany|remove|drop|dropDatabase|dropIndex|dropIndexes|createIndex|createCollection|renameCollection|findAndModify|findOneAndUpdate|findOneAndDelete|findOneAndReplace|bulkWrite|save)[[:space:]]*\('
 SQL_WRITE_RE='(^|[[:space:];(])(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|REPLACE|GRANT|REVOKE|RENAME|LOAD[[:space:]]+DATA|SET[[:space:]]+GLOBAL)([[:space:];(]|$)'
+# Postgres adds statements MySQL lacks, psql meta-commands that reach the shell
+# or filesystem (\! \o \w \i \copy \g*), and anything that could lift the
+# session read-only flag. The regex is only the first line of defence: ro
+# Postgres sessions are also opened with default_transaction_read_only=on, so
+# the server itself rejects any write the regex misses.
+PG_WRITE_RE='(^|[[:space:];(])(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|MERGE|COPY|VACUUM|REINDEX|CLUSTER)([[:space:];(]|$)|READ[[:space:]]+WRITE|transaction_read_only|session_authorization|\\(!|o|w|i|ir|copy|g|set|setenv|cd)([[:space:]]|$|[a-z])'
 
 # Moves the data-fix-scripts rule ("MongoDB and MySQL are read-only query
 # sources") from the honour system to the tool boundary.
@@ -46,9 +52,16 @@ assert_read_only() {
   case "$kind" in
     mongo) re="$MONGO_WRITE_RE" ;;
     mysql) re="$SQL_WRITE_RE" ;;
+    postgres) re="$PG_WRITE_RE" ;;
     *) return 0 ;;
   esac
-  printf '%s' "$query" | grep -qiE "$re" || return 0
+  printf '%s' "$query" | grep -qiE "$re"
+  case $? in
+    0) ;;
+    1) return 0 ;;
+    # Fail closed: a broken pattern must never wave a query through.
+    *) dbq_die "write guard failed to evaluate for '$alias' — refusing to run." ;;
+  esac
 
   if [ "$mode" = "ro" ]; then
     dbq_die "'$alias' is read-only; refusing a mutating query.
@@ -108,6 +121,31 @@ run_mysql() {
   mysql "$@" -e "$query"
 }
 
+run_postgres() {
+  local alias="$1" ddb="$2" query="$3" mode="$4" pgopts
+  require_tool psql
+  dbq_pg_service_exists "$alias" \
+    || dbq_die "no credential for '$alias'. Run: dbq init"
+
+  # ro aliases: the server enforces read-only for every transaction in the
+  # session, so a write the regex missed still fails. libpq ignores PGOPTIONS
+  # whenever the service file sets `options`, so the flag is merged into the
+  # service's own options and passed explicitly in the conninfo.
+  pgopts=$(dbq_pg_service_body "$alias" \
+    | awk '/^[[:space:]]*options[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*/,""); print; exit}')
+  if [ "$mode" = "ro" ]; then
+    pgopts="${pgopts:+$pgopts }-c default_transaction_read_only=on"
+  fi
+  set -- "$(dbq_pg_conninfo "$alias" "$ddb")"
+  # conninfo quoting: single-quote the value, escape \ and '.
+  [ -n "$pgopts" ] && set -- "$1 options='$(printf '%s' "$pgopts" | sed "s/[\\\\']/\\\\&/g")'"
+
+  # -X skips ~/.psqlrc so output is predictable; -w never prompts for a password;
+  # tab-separated, unaligned output mirrors mysql --batch.
+  PGSERVICEFILE="$PGSVC" \
+    psql -X -w -v ON_ERROR_STOP=1 -P pager=off -A -F "$(printf '\t')" "$1" -c "$query"
+}
+
 dispatch_query() {
   local alias="$1" query="$2" idx kind ddb mode
   idx=$(reg_index "$alias") || dbq_die "unknown alias '$alias'. See: dbq --list"
@@ -121,6 +159,7 @@ dispatch_query() {
   case "$kind" in
     mongo) run_mongo "$alias" "$ddb" "$query" ;;
     mysql) run_mysql "$alias" "$ddb" "$query" ;;
+    postgres) run_postgres "$alias" "$ddb" "$query" "$mode" ;;
   esac
 }
 
@@ -128,7 +167,7 @@ dispatch_query() {
 
 cmd_list() {
   reg_load
-  printf '%s%-20s %-6s %-8s %-5s %-12s %s%s\n' "$C_BOLD" \
+  printf '%s%-20s %-8s %-8s %-5s %-12s %s%s\n' "$C_BOLD" \
     ALIAS KIND ENV MODE CREDENTIAL KNOWLEDGE "$C_RESET"
   local i n alias kind cred know
   i=0; n=$(reg_count)
@@ -138,7 +177,7 @@ cmd_list() {
     elif dbq_is_skipped "$alias";           then cred="skipped"
     else                                         cred="missing"; fi
     if [ -d "$KNOWLEDGE_DIR/$alias" ]; then know="yes"; else know="none"; fi
-    printf '%-20s %-6s %-8s %-5s %-12s %s\n' \
+    printf '%-20s %-8s %-8s %-5s %-12s %s\n' \
       "$alias" "$kind" "${REG_ENV[$i]}" "${REG_MODE[$i]}" "$cred" "$know"
     i=$((i+1))
   done
@@ -163,6 +202,10 @@ cmd_dump_cmd() {
     mysql)
       printf '%s\n' "mysql --defaults-file=$MYCNF --defaults-group-suffix=-$alias \\"
       printf '%s\n' "  --batch --raw --column-names ${REG_DDB[$idx]} -e 'SELECT 1'"
+      ;;
+    postgres)
+      printf '%s\n' "PGSERVICEFILE=$PGSVC \\"
+      printf '%s\n' "  psql -X \"$(dbq_pg_conninfo "$alias" "${REG_DDB[$idx]}") options='-c default_transaction_read_only=on'\""
       ;;
   esac
 }
@@ -197,6 +240,12 @@ cmd_collections() {
       fi
       ;;
     mysql) dispatch_query "$alias" 'SHOW TABLES' ;;
+    postgres)
+      # Schema-qualified, so tables outside `public` are not silently hidden.
+      dispatch_query "$alias" "SELECT table_schema || '.' || table_name AS table
+  FROM information_schema.tables
+ WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+ ORDER BY 1" ;;
   esac
 }
 
@@ -206,6 +255,8 @@ cmd_schema() {
   local target="${1:-}" n="${2:-200}" alias coll idx kind
   [ -n "$target" ] || dbq_die "usage: dbq --schema <alias>.<collection> [sample]"
   case "$target" in
+    # Everything after the first dot, so Postgres schema-qualified names work:
+    # betterlife-dev.public.users -> alias betterlife-dev, table public.users
     *.*) alias="${target%%.*}"; coll="${target#*.}" ;;
     *) dbq_die "expected <alias>.<collection>, got '$target'" ;;
   esac
@@ -214,6 +265,28 @@ cmd_schema() {
   kind="${REG_KIND[$idx]}"
 
   case "$kind" in
+    postgres)
+      local sch tbl
+      case "$coll" in
+        *.*) sch="${coll%%.*}"; tbl="${coll#*.}" ;;
+        *)   sch="public";      tbl="$coll" ;;
+      esac
+      # Identifiers validated before interpolation; there is no bind-parameter
+      # path through psql -c.
+      printf '%s' "$sch$tbl" | grep -qE '^[A-Za-z0-9_]+$' \
+        || dbq_die "schema and table names must be [A-Za-z0-9_]: '$coll'"
+      dispatch_query "$alias" "SELECT column_name, data_type, is_nullable, column_default
+  FROM information_schema.columns
+ WHERE table_schema = '$sch' AND table_name = '$tbl'
+ ORDER BY ordinal_position"
+      printf '\n-- indexes --\n'
+      dispatch_query "$alias" "SELECT indexname, indexdef FROM pg_indexes
+ WHERE schemaname = '$sch' AND tablename = '$tbl' ORDER BY 1"
+      printf '\n-- foreign keys --\n'
+      dispatch_query "$alias" "SELECT conname, pg_get_constraintdef(oid) AS definition
+  FROM pg_constraint
+ WHERE contype = 'f' AND conrelid = '\"$sch\".\"$tbl\"'::regclass ORDER BY 1"
+      ;;
     mysql)
       dispatch_query "$alias" "DESCRIBE \`$coll\`"
       printf '\n-- indexes --\n'
@@ -291,7 +364,7 @@ cmd_help() {
 ${C_BOLD}dbq${C_RESET} $DBQ_VERSION — one CLI for every database
 
 ${C_BOLD}QUERY${C_RESET}
-  dbq <alias> '<query>'            run a query using real mongosh / mysql syntax
+  dbq <alias> '<query>'            run a query using real mongosh / mysql / psql syntax
   dbq --file <alias> <path>        run a saved script file
   DBQ_DB=<db> dbq <alias> '...'    override the default database
 
@@ -310,7 +383,9 @@ ${C_BOLD}SETUP${C_RESET}
 ${C_BOLD}EXAMPLES${C_RESET}
   dbq medication 'db.patientPrescription.countDocuments({tenantId:"..."})'
   dbq mysql-prod 'SELECT office_id, name FROM office LIMIT 5'
+  dbq betterlife-dev 'SELECT count(*) FROM public.users'
   dbq --schema patient.patient 500
+  dbq --schema betterlife-dev.public.users
 
 Read-only aliases reject mutating queries; writes go through GraphQL (see the
 data-fix-scripts skill). Scratch files are kept $RETENTION_DAYS days.

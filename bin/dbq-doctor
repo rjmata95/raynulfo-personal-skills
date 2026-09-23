@@ -65,11 +65,15 @@ tilde() { printf '%s' "${1/#$HOME/~}"; }
 # ---------------------------------------------------------------------- tools
 
 head_ "TOOLS"
-for t in mongosh mysql; do
+for t in mongosh mysql psql; do
   if command -v "$t" >/dev/null 2>&1; then
     ok "$t" "$C_DIM$("$t" --version 2>&1 | head -1 | tr -d '\n' | cut -c1-38)$C_RESET"
   else
-    if [ "$t" = mysql ]; then pkg="mysql-client"; else pkg="mongosh"; fi
+    case "$t" in
+      mysql) pkg="mysql-client" ;;
+      psql)  pkg="libpq && brew link --force libpq" ;;
+      *)     pkg="mongosh" ;;
+    esac
     miss "$t" "install: brew install $pkg"
     add_step "brew install $pkg"
   fi
@@ -96,7 +100,7 @@ else
   add_step "dbq init --from-mcp"
 fi
 
-for f in "$ENV_FILE" "$MYCNF"; do
+for f in "$ENV_FILE" "$MYCNF" "$PGSVC"; do
   label=$(tilde "$f")
   if [ -r "$f" ]; then
     p=$(dbq_perms_of "$f")
@@ -106,6 +110,11 @@ for f in "$ENV_FILE" "$MYCNF"; do
       bad "$label" "permissions are $p, must be 600"
       add_step "chmod 600 $f"
     fi
+  elif [ "$f" = "$PGSVC" ]; then
+    # Added with Postgres support; most setups have no Postgres alias, so its
+    # absence alone is not a problem. A Postgres alias without it still shows
+    # as MISSING under CONNECTIONS.
+    note "$label" "none (only needed for postgres aliases)"
   else
     miss "$label" "created by: dbq init"
   fi
@@ -143,7 +152,7 @@ head_ "CONNECTIONS"
 i=0; n=$(reg_count)
 while [ "$i" -lt "$n" ]; do
   a="${REG_ALIAS[$i]}"; kind="${REG_KIND[$i]}"
-  label=$(printf '%-20s %-5s %-7s %s' "$a" "$kind" "${REG_ENV[$i]}" "${REG_MODE[$i]}")
+  label=$(printf '%-20s %-8s %-7s %s' "$a" "$kind" "${REG_ENV[$i]}" "${REG_MODE[$i]}")
 
   if dbq_is_skipped "$a"; then
     skip "$label" "deliberately unset"
@@ -163,12 +172,15 @@ while [ "$i" -lt "$n" ]; do
   fi
 
   start=$(date +%s)
-  if [ "$kind" = mongo ]; then
-    uri=$(dbq_mongo_uri "$a")
-    if dbq_ping_mongo "$uri"; then rc=0; else rc=1; fi
-  else
-    if dbq_ping_mysql_group "$a"; then rc=0; else rc=1; fi
-  fi
+  case "$kind" in
+    mongo)
+      uri=$(dbq_mongo_uri "$a")
+      if dbq_ping_mongo "$uri"; then rc=0; else rc=1; fi ;;
+    postgres)
+      if dbq_ping_pg_service "$a"; then rc=0; else rc=1; fi ;;
+    *)
+      if dbq_ping_mysql_group "$a"; then rc=0; else rc=1; fi ;;
+  esac
   elapsed=$(( $(date +%s) - start ))
 
   if [ "$rc" -eq 0 ]; then

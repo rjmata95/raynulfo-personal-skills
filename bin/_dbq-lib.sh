@@ -27,6 +27,7 @@ dbq_init_paths() {
   CFG_DIR="${DBQ_CONFIG_DIR:-$HOME/.config/dbq}"
   ENV_FILE="$CFG_DIR/env"
   MYCNF="$CFG_DIR/my.cnf"
+  PGSVC="$CFG_DIR/pg_service.conf"
   LOCAL_CONF="$CFG_DIR/connections.local.conf"
   SKIP_FILE="$CFG_DIR/skipped"
   ROLLBACK="$CFG_DIR/mcp-rollback.json"
@@ -113,7 +114,7 @@ $line
 EOF
     [ -n "${alias:-}" ] && [ -n "${kind:-}" ] || continue
     case "$kind" in
-      mongo|mysql) ;;
+      mongo|mysql|postgres) ;;
       *) dbq_warn "$(basename "$file"): alias '$alias' has unknown kind '$kind' — skipped"; continue ;;
     esac
     reg_put "$alias" "$kind" "${env:-unknown}" "${mode:-ro}" "${ddb:--}" "${desc:-}"
@@ -176,10 +177,35 @@ dbq_mysql_extra_options() {
     | grep -vE '^[[:space:]]*$'
 }
 
+# Postgres credentials live in a libpq connection service file, selected with
+# PGSERVICEFILE + service=<alias>. libpq reads the password from it directly, so
+# it never enters argv or the environment — the same guarantee as my.cnf.
+dbq_pg_service_exists() {
+  [ -r "$PGSVC" ] && grep -q "^\[$1\]" "$PGSVC" 2>/dev/null
+}
+
+# Echo the body of an [<alias>] section from pg_service.conf.
+dbq_pg_service_body() {
+  [ -r "$PGSVC" ] || return 1
+  awk -v g="[$1]" '$0==g{f=1;next} /^\[/{f=0} f' "$PGSVC"
+}
+
+# Build the libpq conninfo for an alias. Only the service name and an optional
+# database override — never a secret.
+dbq_pg_conninfo() {
+  local a="$1" db="${2:-}"
+  if [ -n "$db" ] && [ "$db" != "-" ]; then
+    printf 'service=%s dbname=%s' "$a" "$db"
+  else
+    printf 'service=%s' "$a"
+  fi
+}
+
 dbq_has_credential() {
   case "$2" in
     mongo) dbq_mongo_uri "$1" >/dev/null 2>&1 ;;
     mysql) dbq_mysql_group_exists "$1" ;;
+    postgres) dbq_pg_service_exists "$1" ;;
     *) return 1 ;;
   esac
 }
@@ -342,6 +368,39 @@ dbq_ping_mysql_group() {
   return 1
 }
 
+# dbq_ping_pg_direct <host> <port> <user> <pass> <db> <sslmode>
+# Used by init to test values before they are written. Password via PGPASSWORD —
+# environment of the child only, never argv.
+dbq_ping_pg_direct() {
+  local h="$1" p="${2:-5432}" u="$3" pw="$4" d="${5:-postgres}" ssl="${6:-prefer}" rc
+  command -v psql >/dev/null 2>&1 || { DBQ_PING_OUT="psql not installed"; return 1; }
+  [ -n "$d" ] && [ "$d" != "-" ] || d=postgres
+
+  PGPASSWORD="$pw" PGCONNECT_TIMEOUT="${DBQ_PING_TIMEOUT:-20}" PGSSLMODE="$ssl" \
+    _dbq_run_guarded psql -X -w -A -t -h "$h" -p "$p" -U "$u" -d "$d" -c 'SELECT 1'
+  rc=$?
+  _dbq_pg_ping_result "$rc"
+}
+
+# dbq_ping_pg_service <alias> — uses the service file, so no password in argv.
+dbq_ping_pg_service() {
+  local a="$1" rc
+  command -v psql >/dev/null 2>&1 || { DBQ_PING_OUT="psql not installed"; return 1; }
+
+  PGSERVICEFILE="$PGSVC" PGCONNECT_TIMEOUT="${DBQ_PING_TIMEOUT:-20}" \
+    _dbq_run_guarded psql -X -w -A -t "$(dbq_pg_conninfo "$a")" -c 'SELECT 1'
+  rc=$?
+  _dbq_pg_ping_result "$rc"
+}
+
+_dbq_pg_ping_result() {
+  local rc="$1"
+  if [ "$rc" -eq 0 ] && printf '%s' "$DBQ_RUN_OUT" | grep -q '1'; then DBQ_PING_OUT=""; return 0; fi
+  if [ "$rc" -eq 124 ]; then DBQ_PING_OUT="timed out after ${DBQ_PING_TIMEOUT:-20}s — VPN, proxy, or firewall?"; return 1; fi
+  DBQ_PING_OUT=$(dbq_ping_hint "$DBQ_RUN_OUT")
+  return 1
+}
+
 # Turn raw driver noise into one actionable line.
 dbq_ping_hint() {
   local out="$1"
@@ -351,13 +410,19 @@ dbq_ping_hint() {
     # explicitly enabled because it sends the password in the clear.
     *2059*|*"mysql_clear_password"*|*"plugin cannot be loaded"*|*"Authentication plugin"*)
       printf 'server needs cleartext auth (PAM/LDAP) — run: dbq init --alias <alias>, then [a]' ;;
-    *"Authentication failed"*|*"Access denied"*|*"bad auth"*)
+    *"Authentication failed"*|*"Access denied"*|*"bad auth"*|*"password authentication failed"*|*"no password supplied"*)
       printf 'authentication failed — wrong user or password' ;;
-    *ENOTFOUND*|*"Unknown MySQL server"*|*"Name or service not known"*|*"getaddrinfo"*)
+    *ENOTFOUND*|*"Unknown MySQL server"*|*"Name or service not known"*|*"getaddrinfo"*|*"could not translate host name"*)
       printf 'host not found — VPN connected?' ;;
-    *ETIMEDOUT*|*"timed out"*|*"Can'\''t connect"*|*"connection timed out"*)
+    *ETIMEDOUT*|*"timed out"*|*"Can'\''t connect"*|*"connection timed out"*|*"timeout expired"*)
       printf 'timed out — VPN or firewall?' ;;
-    *"not authorized"*)
+    *"Connection refused"*)
+      printf 'connection refused — is the proxy/tunnel running on that port?' ;;
+    *"no pg_hba.conf entry"*)
+      printf 'server rejected this client (pg_hba) — IP not allowlisted, or SSL required' ;;
+    *"database"*"does not exist"*)
+      printf 'database does not exist — check the dbname' ;;
+    *"not authorized"*|*"permission denied"*)
       printf 'connected, but user lacks permission' ;;
     *"self signed"*|*"certificate"*)
       printf 'TLS/certificate problem' ;;
