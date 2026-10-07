@@ -28,6 +28,8 @@ enterprise stack values only.
 **Dogfood execution artifacts.** `sdlc/**` holds plans and execution state produced by running
 the pipeline against the fork itself. None of it exists on the mirror. It is process exhaust,
 and its Jira keys pair enterprise ticket numbers with work the enterprise never commissioned.
+Root-level learning records (`learning-*.md`, e.g. `learning-afk-visual.md`) are the same class:
+a narrative of one dogfood run; its lessons cross only as the skill edits they motivate.
 
 **Fork identity.** Anything naming the fork or the tooling that runs it: `rjmata95`,
 `personal-branch`, the `bridge` remote, `Co-Authored-By: Claude`, `Claude-Session:`,
@@ -71,6 +73,14 @@ Everything in the `main..personal-branch` delta not listed above, including the 
 work-facts / standards-selection mechanism, the spec and review skills (`review-spec`,
 story-bearing `draft-spec`, validity-then-quality `review-pr`), and every validator and fixture
 under `skills/_shared/validators/` that is not stack-specific.
+
+**hunt-gaps evidence (2026-10-07).** `evals/hunt-gaps/**` and its row in `evals/README.md` are
+quarantine: the proof-gate harness is a personal project's spec, code snapshot and answer key, and
+names it throughout. `docs/specs/2026-10-03-hunt-gaps-spec.md` stays behind too: it names the
+personal project, its repos and its owner in the Goal, ACs and Alternatives. The skill itself
+(`skills/hunt-gaps/**`, the one-line offers in `design-spec` and `write-plan`, the `hunt-gaps/` line
+in `sdlc-brain.md`, the README row) is shared, and carries no personal content. The CHANGELOG entry
+crosses with results stated without naming the project.
 
 ## Review-by-hand
 
