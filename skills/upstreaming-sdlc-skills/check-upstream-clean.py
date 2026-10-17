@@ -42,6 +42,7 @@ SHARED_PATHS = [
     "docs/**",
     "evals/**",
     "bin/**",
+    "cursor-rules/**",
     "AGENTS.md",
     "README.md",
     "CHANGELOG.md",

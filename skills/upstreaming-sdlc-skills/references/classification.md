@@ -82,6 +82,10 @@ personal project, its repos and its owner in the Goal, ACs and Alternatives. The
 in `sdlc-brain.md`, the README row) is shared, and carries no personal content. The CHANGELOG entry
 crosses with results stated without naming the project.
 
+**Engram memory (2026-10-17).** `cursor-rules/**` is shared: it holds the bundle's Engram memory
+protocol (`engram-memory-protocol.mdc`), which `AGENTS.md`, the hooks and `/setup-engram` all point
+at. The Engram spec, `docs/pilots/2026-09-30-engram-cursor/` and the harvest scripts cross with it.
+
 ## Review-by-hand
 
 `docs/specs/**` and `docs/plans/**` exist on the mirror, so they are not quarantine by default —
