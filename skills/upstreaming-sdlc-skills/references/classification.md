@@ -86,6 +86,12 @@ crosses with results stated without naming the project.
 protocol (`engram-memory-protocol.mdc`), which `AGENTS.md`, the hooks and `/setup-engram` all point
 at. The Engram spec, `docs/pilots/2026-09-30-engram-cursor/` and the harvest scripts cross with it.
 
+**Spec contracts shape (2026-10-23).** Shared, whole: the Contracts shape and `## Decisions` in
+`spec-authoring.md` / `spec-template.md` / `scan-spec-markdown.py`, the `**Files:**` map in
+`evals/_shared/critical-rules.md` with `bin/rules-for-changes.py`, `evals/_shared/interview-harness/**`,
+and `evals/spec-shape/**` (synthetic refill-retry fixtures, no personal project). Its spec crosses with
+`baseline_commit` set to an enterprise version, never a fork-only one like 2.4.1.
+
 ## Review-by-hand
 
 `docs/specs/**` and `docs/plans/**` exist on the mirror, so they are not quarantine by default —
