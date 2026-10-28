@@ -26,6 +26,8 @@ QUARANTINE_PATHS = [
     "skills/_shared/standards.local/**",
     "skills/_shared/selection-facts.local.json",
     "skills/_shared/validators/test-jira-auth-mode.py",
+    "skills/build-prototype/*",
+    "skills/build-prototype/**",
     "sdlc/*",
     "sdlc/**",
     "*config.local.md",

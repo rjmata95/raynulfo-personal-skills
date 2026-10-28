@@ -25,6 +25,11 @@ selection fact, the stack predicate column in `INDEX.md`, `select_standards.py` 
 and `180-be-layered-service.md` with its `java-spring` reference. Ship the mechanism with the
 enterprise stack values only.
 
+**Prototype hub (2026-10-27).** `skills/build-prototype/**` is quarantine: it builds in the personal
+prototype hub on the personal `react-prototype` stack, whose standard lives in the git-ignored
+overlay. Scrub its README section ("Prototype hub — `build-prototype`") and its CHANGELOG 2.8.0
+entry from any port. It can cross only together with a hub and stack the enterprise runs.
+
 **Dogfood execution artifacts.** `sdlc/**` holds plans and execution state produced by running
 the pipeline against the fork itself. None of it exists on the mirror. It is process exhaust,
 and its Jira keys pair enterprise ticket numbers with work the enterprise never commissioned.
