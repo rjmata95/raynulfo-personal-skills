@@ -1,5 +1,6 @@
 ---
 name: setting-up-dbq
+disable-model-invocation: true
 description: Install and configure the dbq database CLI on a machine, add a MongoDB/MySQL/Postgres connection, and migrate off per-database MCP servers. Use when dbq is not installed or not configured, when a user wants agents to query a new database, when `dbq doctor` reports problems, when a user wants to remove/replace database MCP servers, when setting up a new laptop, when onboarding a teammate to dbq, or when a user says "set up dbq", "migrate off the DB MCPs", "plug and play the database CLI", or asks how to get database access working.
 ---
 
